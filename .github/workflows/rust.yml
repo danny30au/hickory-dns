@@ -28,7 +28,9 @@ jobs:
           make \
           cmake \
           git \
-          pkgconfig
+          pkgconfig \
+          file \
+          binutils
     
     - name: Checkout repository
       uses: actions/checkout@v4
