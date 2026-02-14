@@ -16,45 +16,50 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install 'just' (if you still need it for other tasks)
+    # 1. Install 'just'
     - uses: taiki-e/install-action@just
 
-    # 2. Install 'cargo-workspaces' (if strictly required by justfile logic)
+    # 2. Install 'cargo-workspaces' (required by your justfile)
     - uses: taiki-e/install-action@v2
       with:
         tool: cargo-workspaces
 
-    # 3. Install 'cross' (The solution to your g++ / cc-rs error)
-    # Cross uses Docker containers that HAVE the C++ compiler pre-installed.
-    - uses: taiki-e/install-action@cross
+    # 3. Install musl-tools (Provides 'musl-gcc' only, no g++)
+    - name: Install musl-tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
 
-    # 4. Build using 'cross' instead of 'cargo' or 'just'
-    # This acts exactly like 'cargo build' but inside a container with correct C++ libs.
-    # We replicate 'just all-features' behavior here manually to ensure success.
-    - name: Build with Cross (Static OpenWrt Binary)
+    # 4. Add the Rust musl target
+    - name: Add musl target
+      run: rustup target add x86_64-unknown-linux-musl
+
+    # 5. Build with Just
+    # We explicitly tell cc-rs to use 'musl-gcc' for C compilation
+    - name: Build with Just (Musl Only)
       env:
-        # Static linking flags
+        # Tell the build script to use musl-gcc
+        CC_x86_64_unknown_linux_musl: musl-gcc
+        # Force static linking
         RUSTFLAGS: "-C target-feature=+crt-static"
-      # We use 'cross build' instead of 'just' because 'cross' handles the Docker env automatically.
-      # If you MUST use 'just', your justfile needs to support swapping 'cargo' for 'cross'.
-      run: cross build --verbose --release --target x86_64-unknown-linux-musl --all-features
+        # Ensure cargo targets the correct architecture
+        CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
+      run: just all-features
 
-    # 5. Prepare Artifacts
+    # 6. Prepare Artifacts
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
         
-        # -------------------------------------------------------------
-        # CRITICAL: Replace 'my-app' with your actual binary name!
-        # Check your Cargo.toml for [package] name = "..."
-        # -------------------------------------------------------------
+        # BINARY NAME: Set to 'hickory-dns' based on your previous logs
         BINARY_NAME="hickory-dns"
         
-        # Cross outputs to the standard target directory
+        # Verify and copy
         if [ -f "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" ]; then
           cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" staging/
         else
           echo "Error: Binary '$BINARY_NAME' not found!"
+          echo "Available files:"
           ls -F target/x86_64-unknown-linux-musl/release/
           exit 1
         fi
