@@ -16,24 +16,27 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install Zig (The Linker/Compiler)
+    # 1. Install Zig (The Cross-Linker)
     - uses: goto-bus-stop/setup-zig@v2
       with:
         version: '0.13.0'
 
-    # 2. Add OpenWrt Target
+    # 2. Add OpenWrt Target (Rust std for musl)
     - run: rustup target add x86_64-unknown-linux-musl
 
-    # 3. Create Smart Wrapper Scripts (Essential for C dependencies like Ring/AWS-LC)
+    # 3. Install cargo-zigbuild (Simplifies cross-compilation)
+    - uses: taiki-e/install-action@cargo-zigbuild
+
+    # 4. Create Zig CC Wrappers (CRITICAL for C dependencies like Ring/AWS-LC)
     - name: Create Zig CC Wrappers
       run: |
         mkdir -p tools
-        # Wrapper for GCC
+        # GCC Wrapper: Filters out incompatible flags and invokes zig cc
         cat << 'EOF' > tools/x86_64-linux-musl-gcc
         #!/bin/sh
         args=""
         for arg in "$@"; do
-            # Filter out the incorrect target flag if present
+            # Filter out the rust-style target flag if present (zig doesn't like it in cc args)
             if [ "$arg" = "--target=x86_64-unknown-linux-musl" ]; then continue; fi
             args="$args "$arg""
         done
@@ -41,7 +44,7 @@ jobs:
         EOF
         chmod +x tools/x86_64-linux-musl-gcc
         
-        # Wrapper for G++
+        # G++ Wrapper
         cat << 'EOF' > tools/x86_64-linux-musl-g++
         #!/bin/sh
         args=""
@@ -53,55 +56,59 @@ jobs:
         EOF
         chmod +x tools/x86_64-linux-musl-g++
         
+        # Add tools to PATH
         echo "$PWD/tools" >> $GITHUB_PATH
 
-    # 4. Build with Explicit Features (The Solution)
-    # We bypass 'just' to avoid broken tests.
-    # We explicitly enable 'recursor' and 'dns-over-https-rustls' to ensure forwarding works.
-    # We use 'dnssec-ring' to avoid OpenSSL issues.
+    # 5. Build with Explicit Features (The Fix)
     - name: Build Full Binary
       env:
-        CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
-        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: "zig"
-        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C linker=zig -C link-arg=-cc -C link-arg=-target -C link-arg=x86_64-linux-musl"
-        
         # Point C compilers to our wrappers
         CC_x86_64_unknown_linux_musl: "x86_64-linux-musl-gcc"
         CXX_x86_64_unknown_linux_musl: "x86_64-linux-musl-g++"
         AR_x86_64_unknown_linux_musl: "zig ar"
+        
+        # Ensure static linking
+        RUSTFLAGS: "-C target-feature=+crt-static"
       
-      # The Command:
-      # -p hickory-dns: Build only the server
-      # --no-default-features: Clean slate
-      # --features: Enable exactly what we need for OpenWrt
+      # We use cargo-zigbuild to handle the linking logic.
+      # --no-default-features: Prevents pulling in OpenSSL
+      # --features: Explicitly enables Recursor, DoH, DoT, DNSSEC-Ring
       run: >
-        cargo build --verbose --release --target x86_64-unknown-linux-musl
+        cargo zigbuild --verbose --release --target x86_64-unknown-linux-musl
         -p hickory-dns
         --no-default-features
         --features std,recursor,resolver,dns-over-https-rustls,dns-over-rustls,dns-over-quic,dns-over-h3,dnssec-ring,sqlite,system-config
 
-    # 5. Prepare & Upload
+    # 6. Prepare Artifacts
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
         BINARY_NAME="hickory-dns"
         
-        SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "x86_64-unknown-linux-musl/release" | head -n 1)
+        # Find the release binary (ignoring deps or build scripts)
+        SOURCE=$(find target/x86_64-unknown-linux-musl/release -maxdepth 1 -name "$BINARY_NAME" -type f | head -n 1)
         
         if [ -z "$SOURCE" ]; then 
-            echo "Error: Binary '$BINARY_NAME' not found."
+            echo "Error: Binary '$BINARY_NAME' not found in target/x86_64-unknown-linux-musl/release/"
+            ls -F target/x86_64-unknown-linux-musl/release/
             exit 1
         fi
         
         echo "Found binary at: $SOURCE"
-        file "$SOURCE"
-        strip "$SOURCE"
-        cp "$SOURCE" staging/
         
+        # Verify it is static
+        file "$SOURCE"
+        
+        # Strip debug symbols to reduce size
+        strip "$SOURCE"
+        
+        cp "$SOURCE" staging/
         ls -lh staging/
 
+    # 7. Upload
     - name: Upload OpenWrt Binary
       uses: actions/upload-artifact@v4
       with:
         name: hickory-dns-openwrt-full
         path: staging/
+        if-no-files-found: error
