@@ -21,16 +21,33 @@ jobs:
       with:
         version: '0.13.0'
 
-    # 2. Install 'just'
+    # 2. Install Tools
     - uses: taiki-e/install-action@just
-
-    # 3. Install 'cargo-workspaces'
     - uses: taiki-e/install-action@v2
       with:
         tool: cargo-workspaces
 
-    # 4. Add OpenWrt Target
+    # 3. Add Rust Target
     - run: rustup target add x86_64-unknown-linux-musl
+
+    # 4. Create Wrapper Scripts for Zig
+    # This tricks cc-rs into thinking it has a real GCC compiler
+    - name: Create Zig CC Wrappers
+      run: |
+        mkdir -p tools
+        
+        # Create wrapper for CC (C Compiler)
+        echo '#!/bin/sh' > tools/x86_64-linux-musl-gcc
+        echo 'zig cc -target x86_64-linux-musl "$@"' >> tools/x86_64-linux-musl-gcc
+        chmod +x tools/x86_64-linux-musl-gcc
+        
+        # Create wrapper for CXX (C++ Compiler)
+        echo '#!/bin/sh' > tools/x86_64-linux-musl-g++
+        echo 'zig c++ -target x86_64-linux-musl "$@"' >> tools/x86_64-linux-musl-g++
+        chmod +x tools/x86_64-linux-musl-g++
+        
+        # Add 'tools' to PATH
+        echo "$PWD/tools" >> $GITHUB_PATH
 
     # 5. Build with Just
     - name: Build with Just
@@ -38,14 +55,13 @@ jobs:
         # Force the target architecture
         CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
         
-        # Configure Zig as the linker for Rust
+        # Configure Rust to use Zig as Linker
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: "zig"
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C linker=zig -C link-arg=-cc -C link-arg=-target -C link-arg=x86_64-linux-musl"
 
-        # --- CRITICAL FIX: Configure Zig as the C/C++ Compiler for dependencies ---
-        # This fixes 'failed to find tool x86_64-linux-musl-gcc'
-        CC_x86_64_unknown_linux_musl: "zig cc -target x86_64-linux-musl"
-        CXX_x86_64_unknown_linux_musl: "zig c++ -target x86_64-linux-musl"
+        # Configure C/C++ Compilers to use our wrappers
+        CC_x86_64_unknown_linux_musl: "x86_64-linux-musl-gcc"
+        CXX_x86_64_unknown_linux_musl: "x86_64-linux-musl-g++"
         AR_x86_64_unknown_linux_musl: "zig ar"
       
       run: just all-features
@@ -56,8 +72,7 @@ jobs:
         mkdir -p staging
         BINARY_NAME="hickory-dns"
         
-        # Search for binary (Just might use release or debug depending on the recipe default)
-        # We prioritize release
+        # Find binary
         SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "x86_64-unknown-linux-musl" | head -n 1)
         
         if [ -z "$SOURCE" ]; then 
@@ -66,11 +81,7 @@ jobs:
         fi
         
         echo "Found binary at: $SOURCE"
-        
-        # Verify static
         file "$SOURCE"
-        
-        # Strip
         strip "$SOURCE"
         cp "$SOURCE" staging/
         
