@@ -16,25 +16,55 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # 1. Install Musl tools (required for static linking)
     - name: Install musl-tools
       run: |
         sudo apt-get update
         sudo apt-get install -y musl-tools
 
+    # 2. Add the OpenWrt-compatible target
     - name: Add musl target
       run: rustup target add x86_64-unknown-linux-musl
 
-    # OpenWrt specific: Configure build for small binary size
-    # You can also add these settings to Cargo.toml
+    # 3. Optimize for Size (Critical for OpenWrt)
+    # This creates a cargo config that strips debug symbols and enables LTO
     - name: Configure Cargo for size
       run: |
-        # Creates a cargo config to strip symbols automatically (Rust 1.59+)
         mkdir -p .cargo
         echo '[profile.release]' >> .cargo/config.toml
         echo 'strip = true' >> .cargo/config.toml
         echo 'opt-level = "z"' >> .cargo/config.toml
         echo 'lto = true' >> .cargo/config.toml
         echo 'codegen-units = 1' >> .cargo/config.toml
+        echo 'panic = "abort"' >> .cargo/config.toml
+
+    # 4. Build the project
+    - name: Build for OpenWrt (Release)
+      run: cargo build --verbose --release --target x86_64-unknown-linux-musl
+
+    # 5. Run tests (Optional - skip if tests fail on musl)
+    - name: Run tests
+      run: cargo test --verbose --target x86_64-unknown-linux-musl
+
+    # 6. Auto-detect and Stage Binary
+    # This solves the "No files found" error by finding the executable automatically
+    - name: Prepare Artifacts
+      run: |
+        mkdir -p staging
+        # Find the executable file in the release directory (excluding .d files) and copy it to staging
+        find target/x86_64-unknown-linux-musl/release -maxdepth 1 -type f -executable ! -name "*.d" -exec cp {} staging/ ;
+        
+        # Verify what was found (for debugging logs)
+        echo "Files ready for upload:"
+        ls -lh staging/
+
+    # 7. Upload
+    - name: Upload OpenWrt Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-x86_64-binary
+        path: staging/
+        if-no-files-found: error        echo 'codegen-units = 1' >> .cargo/config.toml
 
     - name: Build for OpenWrt (Release)
       # Use --release to apply the size optimizations
