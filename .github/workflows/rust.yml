@@ -16,7 +16,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install Zig (Linker)
+    # 1. Install Zig
     - uses: goto-bus-stop/setup-zig@v2
       with:
         version: '0.13.0'
@@ -24,7 +24,7 @@ jobs:
     # 2. Install 'just'
     - uses: taiki-e/install-action@just
 
-    # 3. INSTALL CARGO-WORKSPACES (Fixes 'no such command: ws')
+    # 3. Install 'cargo-workspaces' (REQUIRED for 'just all-features')
     - uses: taiki-e/install-action@v2
       with:
         tool: cargo-workspaces
@@ -32,8 +32,7 @@ jobs:
     # 4. Add OpenWrt Target
     - run: rustup target add x86_64-unknown-linux-musl
 
-    # 5. Build using 'just'
-    # We use environment variables to inject the Zig linker into Cargo
+    # 5. Build with Just
     - name: Build with Just
       env:
         # Force the target architecture
@@ -41,26 +40,24 @@ jobs:
         
         # Configure Zig as the linker for musl
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: "zig"
-        # Flags to make Zig behave like cc for this target
-        # Note: We repeat crt-static to be sure
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C linker=zig -C link-arg=-cc -C link-arg=-target -C link-arg=x86_64-linux-musl"
       
-      # Now this should work because 'cargo-workspaces' is installed
-      run: just --all-features 
+      # CORRECTED: Run the recipe by name (no dashes)
+      run: just all-features
 
     # 6. Prepare Artifacts
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
         
-        # Locate the binary (Just/Workspaces might output to a workspace target dir)
+        # Locate the binary
         BINARY_NAME="hickory-dns"
         
         # Find the release binary in the target folder
         SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "x86_64-unknown-linux-musl/release" | head -n 1)
         
         if [ -z "$SOURCE" ]; then
-             # Fallback search
+             # Fallback search if just outputs to workspace root
              SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "release" | head -n 1)
         fi
 
