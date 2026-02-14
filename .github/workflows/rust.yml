@@ -1,4 +1,4 @@
-name: Rust OpenWrt (ZigBuild)
+name: Rust OpenWrt Full Build
 
 on:
   push:
@@ -16,22 +16,21 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install Zig (Standard Action)
+    # 1. Install Zig (The builder)
     - uses: goto-bus-stop/setup-zig@v2
       with:
-        version: '0.13.0' # Use a recent stable version
+        version: '0.13.0'
 
     # 2. Install cargo-zigbuild
     - uses: taiki-e/install-action@cargo-zigbuild
 
-    # 3. Add Rust Target
+    # 3. Add Target
     - run: rustup target add x86_64-unknown-linux-musl
 
-    # 4. Build with Zig
-    # Zig acts as a drop-in for the linker, providing modern musl support
-    - name: Build with Zig
+    # 4. Build with ALL FEATURES (Crucial Step!)
+    # --all-features ensures recursor, dns-over-https, and forwarder modules are compiled in.
+    - name: Build Full Binary with Zig
       env:
-        # Force static linking
         RUSTFLAGS: "-C target-feature=+crt-static"
       run: cargo zigbuild --verbose --release --target x86_64-unknown-linux-musl --all-features
 
@@ -54,7 +53,7 @@ jobs:
         # Verify it is static
         file "$SOURCE"
         
-        # Strip for size (using standard strip)
+        # Strip for size
         strip "$SOURCE"
         cp "$SOURCE" staging/
         
@@ -63,5 +62,5 @@ jobs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: openwrt-musl-binary
+        name: openwrt-full-binary
         path: staging/
