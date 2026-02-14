@@ -16,46 +16,53 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # FIX: Use the reliable taiki-e action to install just
+    # 1. Install 'just' (command runner)
     - uses: taiki-e/install-action@just
 
+    # 2. Install 'cargo-workspaces' (plugin required by your justfile)
+    # Using 'taiki-e/install-action' is much faster than 'cargo install'
+    - uses: taiki-e/install-action@cargo-workspaces
+
+    # 3. Install musl-tools (for static linking against musl libc)
     - name: Install musl-tools
       run: |
         sudo apt-get update
         sudo apt-get install -y musl-tools
 
+    # 4. Add the OpenWrt-compatible target
     - name: Add musl target
       run: rustup target add x86_64-unknown-linux-musl
 
-    # Configure optimization flags (optional but good for OpenWrt)
-    - name: Configure Cargo for size
-      run: |
-        mkdir -p .cargo
-        echo '[profile.release]' >> .cargo/config.toml
-        echo 'strip = true' >> .cargo/config.toml
-        echo 'opt-level = "z"' >> .cargo/config.toml
-        echo 'lto = true' >> .cargo/config.toml
-        echo 'codegen-units = 1' >> .cargo/config.toml
-        echo 'panic = "abort"' >> .cargo/config.toml
-
-    # Build using 'just'. 
-    # Note: We set the target via ENV because passing flags to 'just' 
-    # depends on how the justfile is written.
-    - name: Build with Just
+    # 5. Build using YOUR justfile command
+    - name: Build with Just (Static OpenWrt Binary)
       env:
+        # Force static linking for OpenWrt compatibility
+        RUSTFLAGS: "-C target-feature=+crt-static"
+        # Ensure cargo targets the correct architecture
         CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
-        RUSTFLAGS: "-C target-feature=+crt-static" # Ensure static linking
-      run: just all-features
+      # The justfile command you requested
+      # We add --release to ensure it's optimized
+      run: just all-features --release
 
+    # 6. Prepare the single binary file
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
-        # REMEMBER: Change 'my-app' to your actual binary name from Cargo.toml
-        cp target/x86_64-unknown-linux-musl/release/my-app staging/
         
-        echo "Files ready for upload:"
+        # -------------------------------------------------------------
+        # CRITICAL: Replace 'my-app' with your actual binary name!
+        # Check your Cargo.toml for [package] name = "..."
+        # -------------------------------------------------------------
+        BINARY_NAME="my-app"
+        
+        # We copy the specific binary from the musl release folder
+        cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" staging/
+        
+        # Verify we have exactly one file
+        echo "Artifact ready for upload:"
         ls -lh staging/
 
+    # 7. Upload the single file
     - name: Upload OpenWrt Artifact
       uses: actions/upload-artifact@v4
       with:
