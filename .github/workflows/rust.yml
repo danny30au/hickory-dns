@@ -16,14 +16,15 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install 'just' (command runner)
+    # 1. Install 'just'
     - uses: taiki-e/install-action@just
 
-    # 2. Install 'cargo-workspaces' (plugin required by your justfile)
-    # Using 'taiki-e/install-action' is much faster than 'cargo install'
-    - uses: taiki-e/install-action@cargo-workspaces
+    # 2. Install 'cargo-workspaces' correctly
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-workspaces
 
-    # 3. Install musl-tools (for static linking against musl libc)
+    # 3. Install musl-tools (for static linking)
     - name: Install musl-tools
       run: |
         sudo apt-get update
@@ -33,18 +34,15 @@ jobs:
     - name: Add musl target
       run: rustup target add x86_64-unknown-linux-musl
 
-    # 5. Build using YOUR justfile command
+    # 5. Build with Just
+    # We pass the target flag explicitly in the command args so cargo-workspaces sees it
     - name: Build with Just (Static OpenWrt Binary)
       env:
-        # Force static linking for OpenWrt compatibility
         RUSTFLAGS: "-C target-feature=+crt-static"
-        # Ensure cargo targets the correct architecture
         CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
-      # The justfile command you requested
-      # We add --release to ensure it's optimized
-      run: just all-features --release
+      run: just all-features --release --target x86_64-unknown-linux-musl
 
-    # 6. Prepare the single binary file
+    # 6. Prepare Artifacts
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
@@ -55,14 +53,19 @@ jobs:
         # -------------------------------------------------------------
         BINARY_NAME="my-app"
         
-        # We copy the specific binary from the musl release folder
-        cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" staging/
+        # Check if the file exists before copying to avoid obscure errors
+        if [ -f "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" ]; then
+          cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" staging/
+        else
+          echo "Error: Binary '$BINARY_NAME' not found!"
+          echo "Available files in release folder:"
+          ls -F target/x86_64-unknown-linux-musl/release/
+          exit 1
+        fi
         
-        # Verify we have exactly one file
         echo "Artifact ready for upload:"
         ls -lh staging/
 
-    # 7. Upload the single file
     - name: Upload OpenWrt Artifact
       uses: actions/upload-artifact@v4
       with:
