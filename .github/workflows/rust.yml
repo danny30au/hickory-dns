@@ -24,7 +24,7 @@ jobs:
     # 2. Install 'just'
     - uses: taiki-e/install-action@just
 
-    # 3. Install 'cargo-workspaces' (REQUIRED for 'just all-features')
+    # 3. Install 'cargo-workspaces'
     - uses: taiki-e/install-action@v2
       with:
         tool: cargo-workspaces
@@ -38,29 +38,28 @@ jobs:
         # Force the target architecture
         CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
         
-        # Configure Zig as the linker for musl
+        # Configure Zig as the linker for Rust
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: "zig"
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C linker=zig -C link-arg=-cc -C link-arg=-target -C link-arg=x86_64-linux-musl"
+
+        # --- CRITICAL FIX: Configure Zig as the C/C++ Compiler for dependencies ---
+        # This fixes 'failed to find tool x86_64-linux-musl-gcc'
+        CC_x86_64_unknown_linux_musl: "zig cc -target x86_64-linux-musl"
+        CXX_x86_64_unknown_linux_musl: "zig c++ -target x86_64-linux-musl"
+        AR_x86_64_unknown_linux_musl: "zig ar"
       
-      # CORRECTED: Run the recipe by name (no dashes)
       run: just all-features
 
     # 6. Prepare Artifacts
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
-        
-        # Locate the binary
         BINARY_NAME="hickory-dns"
         
-        # Find the release binary in the target folder
-        SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "x86_64-unknown-linux-musl/release" | head -n 1)
+        # Search for binary (Just might use release or debug depending on the recipe default)
+        # We prioritize release
+        SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "x86_64-unknown-linux-musl" | head -n 1)
         
-        if [ -z "$SOURCE" ]; then
-             # Fallback search if just outputs to workspace root
-             SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "release" | head -n 1)
-        fi
-
         if [ -z "$SOURCE" ]; then 
             echo "Error: Binary '$BINARY_NAME' not found."
             exit 1
