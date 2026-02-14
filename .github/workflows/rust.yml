@@ -1,4 +1,4 @@
-name: OpenWrt Hickory DNS Build
+name: OpenWrt Hickory DNS (via Just)
 
 on:
   push:
@@ -16,59 +16,71 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install Zig (Compiler/Linker)
+    # 1. Install Zig (Linker)
     - uses: goto-bus-stop/setup-zig@v2
       with:
         version: '0.13.0'
 
-    # 2. Install cargo-zigbuild (Wrapper for Cargo)
-    - uses: taiki-e/install-action@cargo-zigbuild
+    # 2. Install 'just'
+    - uses: taiki-e/install-action@just
 
-    # 3. Add OpenWrt Target (x86_64 musl)
+    # 3. Add OpenWrt Target
     - run: rustup target add x86_64-unknown-linux-musl
 
-    # 4. Build Full Binary
-    # - --all-features: Enables Recursion, DoH, DoT, etc.
-    # - -p hickory-dns: Builds the server binary specifically
-    # - crt-static: Forces static linking
-    - name: Build with Zig (Full Features)
+    # 4. Build using 'just'
+    # We set environment variables to force Cargo (called by Just) 
+    # to use the Zig linker for our target.
+    - name: Build with Just
       env:
+        # Force the target architecture
+        CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
+        
+        # Force static linking
         RUSTFLAGS: "-C target-feature=+crt-static"
-      run: cargo zigbuild --verbose --release --target x86_64-unknown-linux-musl --all-features -p hickory-dns
+        
+        # TELL CARGO TO USE ZIG AS THE LINKER for this target
+        # This overrides the default linker so we get OpenWrt compatibility
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: "zig"
+        # Arguments for Zig to behave like a C compiler/linker
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C linker=zig -C link-arg=-cc -C link-arg=-target -C link-arg=x86_64-linux-musl"
+      
+      # The command you requested
+      # We add --release if the justfile allows arguments, or rely on env var if not.
+      # Assuming 'just --all-features' builds release or you can pass 'release' to it.
+      run: just --all-features 
 
-    # 5. Prepare & Optimize
+    # 5. Prepare Artifacts
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
         
-        # The binary is named 'hickory-dns'
+        # Check standard release path
+        # Note: Just might output to target/release or target/<arch>/release
         BINARY_NAME="hickory-dns"
-        SOURCE="target/x86_64-unknown-linux-musl/release/$BINARY_NAME"
         
-        if [ ! -f "$SOURCE" ]; then 
-            echo "Error: Binary not found at $SOURCE"
-            ls -F target/x86_64-unknown-linux-musl/release/
+        # Find the binary (since just might put it in different spots depending on config)
+        SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "release" | head -n 1)
+        
+        if [ -z "$SOURCE" ]; then 
+            echo "Error: Binary '$BINARY_NAME' not found in target folder."
             exit 1
         fi
         
-        echo "Found binary: $BINARY_NAME"
+        echo "Found binary at: $SOURCE"
         
-        # Verify it is static
+        # Verify static
         file "$SOURCE"
         
-        # Strip debug symbols to reduce size
+        # Strip
         strip "$SOURCE"
-        
-        # Copy to staging folder
         cp "$SOURCE" staging/
         
-        echo "Artifact ready for upload:"
         ls -lh staging/
 
     # 6. Upload
     - name: Upload OpenWrt Binary
       uses: actions/upload-artifact@v4
       with:
-        name: hickory-dns-openwrt-x86_64
+        name: hickory-dns-just-build
         path: staging/
         if-no-files-found: error
