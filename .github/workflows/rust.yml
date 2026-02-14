@@ -16,8 +16,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install 'just' using a pre-built action (fastest method)
-    - uses: extra-toolchains/setup-just@v2
+    # FIX: Use the reliable taiki-e action to install just
+    - uses: taiki-e/install-action@just
 
     - name: Install musl-tools
       run: |
@@ -27,23 +27,31 @@ jobs:
     - name: Add musl target
       run: rustup target add x86_64-unknown-linux-musl
 
-    # 2. Run 'just' to build
-    # Assuming your justfile handles the build command.
-    # If your justfile recipe is named 'all-features', use that.
-    # We pass the target flag if your justfile accepts arguments, 
-    # OR you might need to set CARGO_BUILD_TARGET env var if the justfile doesn't pass args.
+    # Configure optimization flags (optional but good for OpenWrt)
+    - name: Configure Cargo for size
+      run: |
+        mkdir -p .cargo
+        echo '[profile.release]' >> .cargo/config.toml
+        echo 'strip = true' >> .cargo/config.toml
+        echo 'opt-level = "z"' >> .cargo/config.toml
+        echo 'lto = true' >> .cargo/config.toml
+        echo 'codegen-units = 1' >> .cargo/config.toml
+        echo 'panic = "abort"' >> .cargo/config.toml
+
+    # Build using 'just'. 
+    # Note: We set the target via ENV because passing flags to 'just' 
+    # depends on how the justfile is written.
     - name: Build with Just
       env:
-        # Many justfiles respect Cargo env vars
         CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
+        RUSTFLAGS: "-C target-feature=+crt-static" # Ensure static linking
       run: just all-features --release
 
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
-        # Update path if 'just' outputs somewhere else, but usually it's standard cargo target
-        # REMEMBER: Check your Cargo.toml for the binary name!
-        cp target/x86_64-unknown-linux-musl/release/YOUR_BINARY_NAME staging/
+        # REMEMBER: Change 'my-app' to your actual binary name from Cargo.toml
+        cp target/x86_64-unknown-linux-musl/release/my-app staging/
         
         echo "Files ready for upload:"
         ls -lh staging/
