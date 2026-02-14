@@ -47,7 +47,7 @@ jobs:
       # The command you requested
       # We add --release if the justfile allows arguments, or rely on env var if not.
       # Assuming 'just --all-features' builds release or you can pass 'release' to it.
-      run: just -- --all-features 
+      run: just all-features 
 
     # 5. Prepare Artifacts
     - name: Prepare Artifacts
