@@ -1,4 +1,4 @@
-name: Rust Universal Static Binary
+name: OpenWrt Static Build
 
 on:
   push:
@@ -16,44 +16,53 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install 'cross' (The magic tool)
-    # It uses Docker to provide a perfect build environment with musl-gcc/g++
+    # 1. Install 'cross' (The robust builder tool)
     - uses: taiki-e/install-action@cross
 
-    # 2. Build Static Binary (The "Universal" Part)
-    # - Target: x86_64-unknown-linux-musl (Works on OpenWrt & Linux)
-    # - RUSTFLAGS: crt-static (Ensures NO external dependencies)
-    - name: Build Universal Static Binary
+    # 2. Build Fully Static Binary
+    # - target: x86_64-unknown-linux-musl (OpenWrt native)
+    # - crt-static: This is the magic flag that removes all external dependencies
+    - name: Build Static Binary
       env:
         RUSTFLAGS: "-C target-feature=+crt-static"
       run: cross build --verbose --release --target x86_64-unknown-linux-musl --all-features
 
-    # 3. Prepare Artifacts
+    # 3. Strip & Verify
+    # This reduces file size and confirms the binary has no dependencies
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
         
-        # -------------------------------------------------------------
-        # REPLACE 'hickory-dns' with your actual binary name!
-        # -------------------------------------------------------------
+        # -----------------------------------------------------------
+        # CHECK YOUR BINARY NAME HERE (e.g., hickory-dns, my-app)
+        # -----------------------------------------------------------
         BINARY_NAME="hickory-dns"
+        SOURCE_PATH="target/x86_64-unknown-linux-musl/release/$BINARY_NAME"
         
-        # Verify and copy
-        if [ -f "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" ]; then
-          cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" staging/
-        else
-          echo "Error: Binary '$BINARY_NAME' not found!"
-          ls -F target/x86_64-unknown-linux-musl/release/
-          exit 1
+        if [ ! -f "$SOURCE_PATH" ]; then
+            echo "Error: Binary '$BINARY_NAME' not found at $SOURCE_PATH"
+            ls -F target/x86_64-unknown-linux-musl/release/
+            exit 1
         fi
+
+        echo "Processing $BINARY_NAME..."
         
-        echo "Artifact ready for upload:"
+        # 1. Check if it is actually static (should say 'statically linked')
+        file "$SOURCE_PATH"
+        
+        # 2. Strip debug symbols (Drastically reduces size for OpenWrt)
+        strip "$SOURCE_PATH"
+        
+        # 3. Copy to staging
+        cp "$SOURCE_PATH" staging/
+        
+        echo "Success! Final binary size:"
         ls -lh staging/
 
     # 4. Upload
-    - name: Upload Universal Binary
+    - name: Upload OpenWrt Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: universal-linux-x64-binary
+        name: openwrt-static-binary
         path: staging/
         if-no-files-found: error
