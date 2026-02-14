@@ -48,7 +48,7 @@ jobs:
         # CRITICAL: Replace 'my-app' with your actual binary name!
         # Check your Cargo.toml for [package] name = "..."
         # -------------------------------------------------------------
-        BINARY_NAME="my-app"
+        BINARY_NAME="hickory-dns"
         
         # Cross outputs to the standard target directory
         if [ -f "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" ]; then
