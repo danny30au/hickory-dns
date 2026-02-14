@@ -16,27 +16,25 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install Zig (The Cross-Linker)
+    # 1. Install Zig
     - uses: goto-bus-stop/setup-zig@v2
       with:
         version: '0.13.0'
 
-    # 2. Add OpenWrt Target (Rust std for musl)
+    # 2. Add OpenWrt Target
     - run: rustup target add x86_64-unknown-linux-musl
 
-    # 3. Install cargo-zigbuild (Simplifies cross-compilation)
+    # 3. Install cargo-zigbuild
     - uses: taiki-e/install-action@cargo-zigbuild
 
-    # 4. Create Zig CC Wrappers (CRITICAL for C dependencies like Ring/AWS-LC)
+    # 4. Create Zig CC Wrappers
     - name: Create Zig CC Wrappers
       run: |
         mkdir -p tools
-        # GCC Wrapper: Filters out incompatible flags and invokes zig cc
         cat << 'EOF' > tools/x86_64-linux-musl-gcc
         #!/bin/sh
         args=""
         for arg in "$@"; do
-            # Filter out the rust-style target flag if present (zig doesn't like it in cc args)
             if [ "$arg" = "--target=x86_64-unknown-linux-musl" ]; then continue; fi
             args="$args "$arg""
         done
@@ -44,7 +42,6 @@ jobs:
         EOF
         chmod +x tools/x86_64-linux-musl-gcc
         
-        # G++ Wrapper
         cat << 'EOF' > tools/x86_64-linux-musl-g++
         #!/bin/sh
         args=""
@@ -56,28 +53,22 @@ jobs:
         EOF
         chmod +x tools/x86_64-linux-musl-g++
         
-        # Add tools to PATH
         echo "$PWD/tools" >> $GITHUB_PATH
 
-    # 5. Build with Explicit Features (The Fix)
+    # 5. Build hickory-dns binary with correct features
     - name: Build Full Binary
       env:
-        # Point C compilers to our wrappers
         CC_x86_64_unknown_linux_musl: "x86_64-linux-musl-gcc"
         CXX_x86_64_unknown_linux_musl: "x86_64-linux-musl-g++"
         AR_x86_64_unknown_linux_musl: "zig ar"
-        
-        # Ensure static linking
         RUSTFLAGS: "-C target-feature=+crt-static"
       
-      # We use cargo-zigbuild to handle the linking logic.
-      # --no-default-features: Prevents pulling in OpenSSL
-      # --features: Explicitly enables Recursor, DoH, DoT, DNSSEC-Ring
+      # Build hickory-dns binary with features available in its Cargo.toml
       run: >
         cargo zigbuild --verbose --release --target x86_64-unknown-linux-musl
         -p hickory-dns
         --no-default-features
-        --features std,recursor,resolver,dns-over-https-rustls,dns-over-rustls,dns-over-quic,dns-over-h3,dnssec-ring,sqlite,system-config
+        --features recursor,sqlite,dnssec-ring,dns-over-rustls,dns-over-https-rustls,dns-over-quic
 
     # 6. Prepare Artifacts
     - name: Prepare Artifacts
@@ -85,23 +76,17 @@ jobs:
         mkdir -p staging
         BINARY_NAME="hickory-dns"
         
-        # Find the release binary (ignoring deps or build scripts)
         SOURCE=$(find target/x86_64-unknown-linux-musl/release -maxdepth 1 -name "$BINARY_NAME" -type f | head -n 1)
         
         if [ -z "$SOURCE" ]; then 
-            echo "Error: Binary '$BINARY_NAME' not found in target/x86_64-unknown-linux-musl/release/"
+            echo "Error: Binary not found"
             ls -F target/x86_64-unknown-linux-musl/release/
             exit 1
         fi
         
-        echo "Found binary at: $SOURCE"
-        
-        # Verify it is static
+        echo "Found: $SOURCE"
         file "$SOURCE"
-        
-        # Strip debug symbols to reduce size
         strip "$SOURCE"
-        
         cp "$SOURCE" staging/
         ls -lh staging/
 
