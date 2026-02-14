@@ -1,4 +1,4 @@
-name: Rust OpenWrt Full Build
+name: OpenWrt Hickory DNS Build
 
 on:
   push:
@@ -16,31 +16,32 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install Zig (The builder)
+    # 1. Install Zig (Compiler/Linker)
     - uses: goto-bus-stop/setup-zig@v2
       with:
         version: '0.13.0'
 
-    # 2. Install cargo-zigbuild
+    # 2. Install cargo-zigbuild (Wrapper for Cargo)
     - uses: taiki-e/install-action@cargo-zigbuild
 
-    # 3. Add Target
+    # 3. Add OpenWrt Target (x86_64 musl)
     - run: rustup target add x86_64-unknown-linux-musl
 
-    # 4. Build with ALL FEATURES (Crucial Step!)
-    # --all-features ensures recursor, dns-over-https, and forwarder modules are compiled in.
-    - name: Build Full Binary with Zig
+    # 4. Build Full Binary
+    # - --all-features: Enables Recursion, DoH, DoT, etc.
+    # - -p hickory-dns: Builds the server binary specifically
+    # - crt-static: Forces static linking
+    - name: Build with Zig (Full Features)
       env:
         RUSTFLAGS: "-C target-feature=+crt-static"
-      run: cargo zigbuild --verbose --release --target x86_64-unknown-linux-musl --all-features
+      run: cargo zigbuild --verbose --release --target x86_64-unknown-linux-musl --all-features -p hickory-dns
 
-    # 5. Prepare & Verify
+    # 5. Prepare & Optimize
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
-        # -----------------------------------------------------------
-        # CHECK YOUR BINARY NAME HERE (e.g., hickory-dns)
-        # -----------------------------------------------------------
+        
+        # The binary is named 'hickory-dns'
         BINARY_NAME="hickory-dns"
         SOURCE="target/x86_64-unknown-linux-musl/release/$BINARY_NAME"
         
@@ -50,17 +51,24 @@ jobs:
             exit 1
         fi
         
+        echo "Found binary: $BINARY_NAME"
+        
         # Verify it is static
         file "$SOURCE"
         
-        # Strip for size
+        # Strip debug symbols to reduce size
         strip "$SOURCE"
+        
+        # Copy to staging folder
         cp "$SOURCE" staging/
         
+        echo "Artifact ready for upload:"
         ls -lh staging/
 
-    - name: Upload Artifact
+    # 6. Upload
+    - name: Upload OpenWrt Binary
       uses: actions/upload-artifact@v4
       with:
-        name: openwrt-full-binary
+        name: hickory-dns-openwrt-x86_64
         path: staging/
+        if-no-files-found: error
