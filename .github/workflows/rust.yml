@@ -1,4 +1,4 @@
-name: Rust
+name: Rust Universal Static Binary
 
 on:
   push:
@@ -16,42 +16,26 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install 'just'
-    - uses: taiki-e/install-action@just
+    # 1. Install 'cross' (The magic tool)
+    # It uses Docker to provide a perfect build environment with musl-gcc/g++
+    - uses: taiki-e/install-action@cross
 
-    # 2. Install 'cargo-workspaces' (required by your justfile)
-    - uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-workspaces
-
-    # 3. Install musl-tools (Provides 'musl-gcc' only, no g++)
-    - name: Install musl-tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y musl-tools
-
-    # 4. Add the Rust musl target
-    - name: Add musl target
-      run: rustup target add x86_64-unknown-linux-musl
-
-    # 5. Build with Just
-    # We explicitly tell cc-rs to use 'musl-gcc' for C compilation
-    - name: Build with Just (Musl Only)
+    # 2. Build Static Binary (The "Universal" Part)
+    # - Target: x86_64-unknown-linux-musl (Works on OpenWrt & Linux)
+    # - RUSTFLAGS: crt-static (Ensures NO external dependencies)
+    - name: Build Universal Static Binary
       env:
-        # Tell the build script to use musl-gcc
-        CC_x86_64_unknown_linux_musl: musl-gcc
-        # Force static linking
         RUSTFLAGS: "-C target-feature=+crt-static"
-        # Ensure cargo targets the correct architecture
-        CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
-      run: just all-features
+      run: cross build --verbose --release --target x86_64-unknown-linux-musl --all-features
 
-    # 6. Prepare Artifacts
+    # 3. Prepare Artifacts
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
         
-        # BINARY NAME: Set to 'hickory-dns' based on your previous logs
+        # -------------------------------------------------------------
+        # REPLACE 'hickory-dns' with your actual binary name!
+        # -------------------------------------------------------------
         BINARY_NAME="hickory-dns"
         
         # Verify and copy
@@ -59,7 +43,6 @@ jobs:
           cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" staging/
         else
           echo "Error: Binary '$BINARY_NAME' not found!"
-          echo "Available files:"
           ls -F target/x86_64-unknown-linux-musl/release/
           exit 1
         fi
@@ -67,9 +50,10 @@ jobs:
         echo "Artifact ready for upload:"
         ls -lh staging/
 
-    - name: Upload OpenWrt Artifact
+    # 4. Upload
+    - name: Upload Universal Binary
       uses: actions/upload-artifact@v4
       with:
-        name: openwrt-x86_64-binary
+        name: universal-linux-x64-binary
         path: staging/
         if-no-files-found: error
