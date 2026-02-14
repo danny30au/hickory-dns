@@ -1,4 +1,4 @@
-name: OpenWrt Static Build
+name: Rust OpenWrt (ZigBuild)
 
 on:
   push:
@@ -16,53 +16,42 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install 'cross' (The robust builder tool)
-    - uses: taiki-e/install-action@cross
+    # 1. Install Zig (The modern cross-compiler)
+    - uses: taiki-e/install-action@zig
+    - uses: taiki-e/install-action@cargo-zigbuild
 
-    # 2. Build Fully Static Binary
-    # - target: x86_64-unknown-linux-musl (OpenWrt native)
-    # - crt-static: This is the magic flag that removes all external dependencies
-    - name: Build Static Binary
+    # 2. Add Target
+    - run: rustup target add x86_64-unknown-linux-musl
+
+    # 3. Build using Zig
+    # Zig acts as a drop-in for the linker, providing modern musl support
+    # We still use --release and --target
+    - name: Build with Zig
       env:
+        # Force static linking
         RUSTFLAGS: "-C target-feature=+crt-static"
-      run: cross build --verbose --release --target x86_64-unknown-linux-musl --all-features
+      run: cargo zigbuild --verbose --release --target x86_64-unknown-linux-musl --all-features
 
-    # 3. Strip & Verify
-    # This reduces file size and confirms the binary has no dependencies
+    # 4. Prepare & Verify
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
-        
-        # -----------------------------------------------------------
-        # CHECK YOUR BINARY NAME HERE (e.g., hickory-dns, my-app)
-        # -----------------------------------------------------------
         BINARY_NAME="hickory-dns"
-        SOURCE_PATH="target/x86_64-unknown-linux-musl/release/$BINARY_NAME"
+        SOURCE="target/x86_64-unknown-linux-musl/release/$BINARY_NAME"
         
-        if [ ! -f "$SOURCE_PATH" ]; then
-            echo "Error: Binary '$BINARY_NAME' not found at $SOURCE_PATH"
-            ls -F target/x86_64-unknown-linux-musl/release/
-            exit 1
-        fi
-
-        echo "Processing $BINARY_NAME..."
+        if [ ! -f "$SOURCE" ]; then echo "Error: Binary not found"; exit 1; fi
         
-        # 1. Check if it is actually static (should say 'statically linked')
-        file "$SOURCE_PATH"
+        # Verify it is static
+        file "$SOURCE"
         
-        # 2. Strip debug symbols (Drastically reduces size for OpenWrt)
-        strip "$SOURCE_PATH"
+        # Strip for size
+        strip "$SOURCE"
+        cp "$SOURCE" staging/
         
-        # 3. Copy to staging
-        cp "$SOURCE_PATH" staging/
-        
-        echo "Success! Final binary size:"
         ls -lh staging/
 
-    # 4. Upload
-    - name: Upload OpenWrt Artifact
+    - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: openwrt-static-binary
+        name: openwrt-musl-1.2.5-binary
         path: staging/
-        if-no-files-found: error
