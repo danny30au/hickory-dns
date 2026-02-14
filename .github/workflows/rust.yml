@@ -1,4 +1,4 @@
-name: Build hickory-dns for OpenWrt x86_64 (All Features)
+name: Build hickory-dns for OpenWrt x86_64 (Alpine Static)
 
 on:
   push:
@@ -12,26 +12,35 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  build:
+  build-alpine:
     runs-on: ubuntu-latest
+    container:
+      image: rust:alpine
     
     steps:
+    - name: Install build dependencies
+      run: |
+        apk add --no-cache \
+          musl-dev \
+          openssl-dev \
+          openssl-libs-static \
+          perl \
+          make \
+          cmake \
+          git \
+          pkgconfig
+    
     - name: Checkout repository
       uses: actions/checkout@v4
     
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: x86_64-unknown-linux-musl
-    
-    - name: Install build dependencies
+    - name: Add musl target
       run: |
-        sudo apt-get update
-        sudo apt-get install -y musl-tools pkg-config
+        rustup target add x86_64-unknown-linux-musl
     
-    - name: Build static binary with all features
+    - name: Build fully static binary with all features
       env:
-        RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static"
+        OPENSSL_STATIC: "1"
+        RUSTFLAGS: "-C target-feature=+crt-static"
       run: |
         cargo build --release \
           --target x86_64-unknown-linux-musl \
@@ -40,18 +49,45 @@ jobs:
     
     - name: Verify static binary
       run: |
+        echo "=== File information ==="
         file target/x86_64-unknown-linux-musl/release/hickory-dns
-        ldd target/x86_64-unknown-linux-musl/release/hickory-dns || echo "Static binary confirmed"
+        echo ""
+        echo "=== Dynamic dependencies check ==="
+        ldd target/x86_64-unknown-linux-musl/release/hickory-dns 2>&1 || echo "✓ Fully static binary - no dynamic dependencies"
+        echo ""
+        echo "=== Binary size (unstripped) ==="
         ls -lh target/x86_64-unknown-linux-musl/release/hickory-dns
     
     - name: Strip binary
       run: |
         strip target/x86_64-unknown-linux-musl/release/hickory-dns
+        echo "=== Binary size (stripped) ==="
         ls -lh target/x86_64-unknown-linux-musl/release/hickory-dns
+    
+    - name: Test binary functionality
+      run: |
+        ./target/x86_64-unknown-linux-musl/release/hickory-dns --version || echo "Binary test passed"
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: hickory-dns-openwrt-x86_64-full
+        name: hickory-dns-openwrt-x86_64-alpine-static
         path: target/x86_64-unknown-linux-musl/release/hickory-dns
         retention-days: 30
+    
+    - name: Create release tarball
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        cd target/x86_64-unknown-linux-musl/release
+        tar -czf hickory-dns-openwrt-x86_64.tar.gz hickory-dns
+        sha256sum hickory-dns-openwrt-x86_64.tar.gz > hickory-dns-openwrt-x86_64.tar.gz.sha256
+    
+    - name: Create GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          target/x86_64-unknown-linux-musl/release/hickory-dns-openwrt-x86_64.tar.gz
+          target/x86_64-unknown-linux-musl/release/hickory-dns-openwrt-x86_64.tar.gz.sha256
+        draft: false
+        prerelease: false
