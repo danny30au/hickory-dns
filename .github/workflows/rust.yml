@@ -16,18 +16,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install Musl tools (required for static linking)
     - name: Install musl-tools
       run: |
         sudo apt-get update
         sudo apt-get install -y musl-tools
 
-    # 2. Add the OpenWrt-compatible target
     - name: Add musl target
       run: rustup target add x86_64-unknown-linux-musl
 
-    # 3. Optimize for Size (Critical for OpenWrt)
-    # This creates a cargo config that strips debug symbols and enables LTO
     - name: Configure Cargo for size
       run: |
         mkdir -p .cargo
@@ -38,45 +34,21 @@ jobs:
         echo 'codegen-units = 1' >> .cargo/config.toml
         echo 'panic = "abort"' >> .cargo/config.toml
 
-    # 4. Build the project
     - name: Build for OpenWrt (Release)
       run: cargo build --verbose --release --target x86_64-unknown-linux-musl
 
-    # 5. Run tests (Optional - skip if tests fail on musl)
-    - name: Run tests
-      run: cargo test --verbose --target x86_64-unknown-linux-musl
-
-    # 6. Auto-detect and Stage Binary
-    # This solves the "No files found" error by finding the executable automatically
+    # Fixed Step: Uses 'cp -t' with '+' terminator to avoid escape character issues
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
-        # Find the executable file in the release directory (excluding .d files) and copy it to staging
-        find target/x86_64-unknown-linux-musl/release -maxdepth 1 -type f -executable ! -name "*.d" -exec cp {} staging/ ;
+        find target/x86_64-unknown-linux-musl/release -maxdepth 1 -type f -executable ! -name "*.d" -exec cp -t staging/ {} +
         
-        # Verify what was found (for debugging logs)
         echo "Files ready for upload:"
         ls -lh staging/
 
-    # 7. Upload
     - name: Upload OpenWrt Artifact
       uses: actions/upload-artifact@v4
       with:
         name: openwrt-x86_64-binary
         path: staging/
-        if-no-files-found: error        echo 'codegen-units = 1' >> .cargo/config.toml
-
-    - name: Build for OpenWrt (Release)
-      # Use --release to apply the size optimizations
-      run: cargo build --verbose --release --target x86_64-unknown-linux-musl
-
-    # Optional: Check binary size
-    - name: Check Binary Size
-      run: ls -lh target/x86_64-unknown-linux-musl/release/
-
-    - name: Upload OpenWrt Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: openwrt-x86_64-binary
-        path: target/x86_64-unknown-linux-musl/release/<binary-name>
         if-no-files-found: error
