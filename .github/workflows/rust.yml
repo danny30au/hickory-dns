@@ -16,32 +16,28 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install 'just'
+    # 1. Install 'just' (if you still need it for other tasks)
     - uses: taiki-e/install-action@just
 
-    # 2. Install 'cargo-workspaces'
+    # 2. Install 'cargo-workspaces' (if strictly required by justfile logic)
     - uses: taiki-e/install-action@v2
       with:
         tool: cargo-workspaces
 
-    # 3. Install Musl Toolchain (C/C++ Support)
-    # This replaces 'musl-tools' and fixes the "g++ not found" error
-    # It provides x86_64-linux-musl-gcc and x86_64-linux-musl-g++
-    - name: Install Musl Toolchain
-      uses: messense/rust-musl-cross@v1
-      with:
-        target: x86_64-unknown-linux-musl
+    # 3. Install 'cross' (The solution to your g++ / cc-rs error)
+    # Cross uses Docker containers that HAVE the C++ compiler pre-installed.
+    - uses: taiki-e/install-action@cross
 
-    # 4. Build with Just
-    # The action above automatically configures CC/CXX env vars,
-    # so 'just' will pick up the correct C++ compiler.
-    - name: Build with Just (Static OpenWrt Binary)
+    # 4. Build using 'cross' instead of 'cargo' or 'just'
+    # This acts exactly like 'cargo build' but inside a container with correct C++ libs.
+    # We replicate 'just all-features' behavior here manually to ensure success.
+    - name: Build with Cross (Static OpenWrt Binary)
       env:
-        # Force static linking
+        # Static linking flags
         RUSTFLAGS: "-C target-feature=+crt-static"
-        # Ensure correct target architecture
-        CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
-      run: just all-features
+      # We use 'cross build' instead of 'just' because 'cross' handles the Docker env automatically.
+      # If you MUST use 'just', your justfile needs to support swapping 'cargo' for 'cross'.
+      run: cross build --verbose --release --target x86_64-unknown-linux-musl --all-features
 
     # 5. Prepare Artifacts
     - name: Prepare Artifacts
@@ -54,12 +50,11 @@ jobs:
         # -------------------------------------------------------------
         BINARY_NAME="my-app"
         
-        # Verify and copy
+        # Cross outputs to the standard target directory
         if [ -f "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" ]; then
           cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" staging/
         else
           echo "Error: Binary '$BINARY_NAME' not found!"
-          echo "Listing release directory contents:"
           ls -F target/x86_64-unknown-linux-musl/release/
           exit 1
         fi
