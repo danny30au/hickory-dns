@@ -16,35 +16,45 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 1. Install Zig (The modern cross-compiler)
-    - uses: taiki-e/install-action@zig
+    # 1. Install Zig (Standard Action)
+    - uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: '0.13.0' # Use a recent stable version
+
+    # 2. Install cargo-zigbuild
     - uses: taiki-e/install-action@cargo-zigbuild
 
-    # 2. Add Target
+    # 3. Add Rust Target
     - run: rustup target add x86_64-unknown-linux-musl
 
-    # 3. Build using Zig
+    # 4. Build with Zig
     # Zig acts as a drop-in for the linker, providing modern musl support
-    # We still use --release and --target
     - name: Build with Zig
       env:
         # Force static linking
         RUSTFLAGS: "-C target-feature=+crt-static"
       run: cargo zigbuild --verbose --release --target x86_64-unknown-linux-musl --all-features
 
-    # 4. Prepare & Verify
+    # 5. Prepare & Verify
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
+        # -----------------------------------------------------------
+        # CHECK YOUR BINARY NAME HERE (e.g., hickory-dns)
+        # -----------------------------------------------------------
         BINARY_NAME="hickory-dns"
         SOURCE="target/x86_64-unknown-linux-musl/release/$BINARY_NAME"
         
-        if [ ! -f "$SOURCE" ]; then echo "Error: Binary not found"; exit 1; fi
+        if [ ! -f "$SOURCE" ]; then 
+            echo "Error: Binary not found at $SOURCE"
+            ls -F target/x86_64-unknown-linux-musl/release/
+            exit 1
+        fi
         
         # Verify it is static
         file "$SOURCE"
         
-        # Strip for size
+        # Strip for size (using standard strip)
         strip "$SOURCE"
         cp "$SOURCE" staging/
         
@@ -53,5 +63,5 @@ jobs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: openwrt-musl-1.2.5-binary
+        name: openwrt-musl-binary
         path: staging/
