@@ -30,20 +30,40 @@ jobs:
     # 3. Add Rust Target
     - run: rustup target add x86_64-unknown-linux-musl
 
-    # 4. Create Wrapper Scripts for Zig
-    # This tricks cc-rs into thinking it has a real GCC compiler
+    # 4. Create SMART Wrapper Scripts
+    # This wrapper strips out the incorrect target flag from cc-rs
     - name: Create Zig CC Wrappers
       run: |
         mkdir -p tools
         
         # Create wrapper for CC (C Compiler)
-        echo '#!/bin/sh' > tools/x86_64-linux-musl-gcc
-        echo 'zig cc -target x86_64-linux-musl "$@"' >> tools/x86_64-linux-musl-gcc
+        cat << 'EOF' > tools/x86_64-linux-musl-gcc
+        #!/bin/sh
+        # Filter out the incorrect target flag if present
+        args=""
+        for arg in "$@"; do
+            if [ "$arg" = "--target=x86_64-unknown-linux-musl" ]; then
+                continue
+            fi
+            args="$args "$arg""
+        done
+        # Run Zig with the correct target
+        eval "zig cc -target x86_64-linux-musl $args"
+        EOF
         chmod +x tools/x86_64-linux-musl-gcc
         
         # Create wrapper for CXX (C++ Compiler)
-        echo '#!/bin/sh' > tools/x86_64-linux-musl-g++
-        echo 'zig c++ -target x86_64-linux-musl "$@"' >> tools/x86_64-linux-musl-g++
+        cat << 'EOF' > tools/x86_64-linux-musl-g++
+        #!/bin/sh
+        args=""
+        for arg in "$@"; do
+            if [ "$arg" = "--target=x86_64-unknown-linux-musl" ]; then
+                continue
+            fi
+            args="$args "$arg""
+        done
+        eval "zig c++ -target x86_64-linux-musl $args"
+        EOF
         chmod +x tools/x86_64-linux-musl-g++
         
         # Add 'tools' to PATH
@@ -52,14 +72,11 @@ jobs:
     # 5. Build with Just
     - name: Build with Just
       env:
-        # Force the target architecture
         CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
-        
-        # Configure Rust to use Zig as Linker
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: "zig"
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C linker=zig -C link-arg=-cc -C link-arg=-target -C link-arg=x86_64-linux-musl"
-
-        # Configure C/C++ Compilers to use our wrappers
+        
+        # Use our smart wrappers
         CC_x86_64_unknown_linux_musl: "x86_64-linux-musl-gcc"
         CXX_x86_64_unknown_linux_musl: "x86_64-linux-musl-g++"
         AR_x86_64_unknown_linux_musl: "zig ar"
@@ -72,7 +89,6 @@ jobs:
         mkdir -p staging
         BINARY_NAME="hickory-dns"
         
-        # Find binary
         SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "x86_64-unknown-linux-musl" | head -n 1)
         
         if [ -z "$SOURCE" ]; then 
