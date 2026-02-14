@@ -45,7 +45,7 @@ jobs:
       env:
         CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
         RUSTFLAGS: "-C target-feature=+crt-static" # Ensure static linking
-      run: just all-features --release
+      run: just all-features
 
     - name: Prepare Artifacts
       run: |
