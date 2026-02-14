@@ -19,30 +19,31 @@ jobs:
     # 1. Install 'just'
     - uses: taiki-e/install-action@just
 
-    # 2. Install 'cargo-workspaces' correctly
+    # 2. Install 'cargo-workspaces'
     - uses: taiki-e/install-action@v2
       with:
         tool: cargo-workspaces
 
-    # 3. Install musl-tools (for static linking)
-    - name: Install musl-tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y musl-tools
+    # 3. Install Musl Toolchain (C/C++ Support)
+    # This replaces 'musl-tools' and fixes the "g++ not found" error
+    # It provides x86_64-linux-musl-gcc and x86_64-linux-musl-g++
+    - name: Install Musl Toolchain
+      uses: messense/rust-musl-cross@v1
+      with:
+        target: x86_64-unknown-linux-musl
 
-    # 4. Add the OpenWrt-compatible target
-    - name: Add musl target
-      run: rustup target add x86_64-unknown-linux-musl
-
-    # 5. Build with Just
-    # We pass the target flag explicitly in the command args so cargo-workspaces sees it
+    # 4. Build with Just
+    # The action above automatically configures CC/CXX env vars,
+    # so 'just' will pick up the correct C++ compiler.
     - name: Build with Just (Static OpenWrt Binary)
       env:
+        # Force static linking
         RUSTFLAGS: "-C target-feature=+crt-static"
+        # Ensure correct target architecture
         CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
       run: just all-features
 
-    # 6. Prepare Artifacts
+    # 5. Prepare Artifacts
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
@@ -53,12 +54,12 @@ jobs:
         # -------------------------------------------------------------
         BINARY_NAME="my-app"
         
-        # Check if the file exists before copying to avoid obscure errors
+        # Verify and copy
         if [ -f "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" ]; then
           cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" staging/
         else
           echo "Error: Binary '$BINARY_NAME' not found!"
-          echo "Available files in release folder:"
+          echo "Listing release directory contents:"
           ls -F target/x86_64-unknown-linux-musl/release/
           exit 1
         fi
