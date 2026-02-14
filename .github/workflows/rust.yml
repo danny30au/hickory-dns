@@ -24,45 +24,48 @@ jobs:
     # 2. Install 'just'
     - uses: taiki-e/install-action@just
 
-    # 3. Add OpenWrt Target
+    # 3. INSTALL CARGO-WORKSPACES (Fixes 'no such command: ws')
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-workspaces
+
+    # 4. Add OpenWrt Target
     - run: rustup target add x86_64-unknown-linux-musl
 
-    # 4. Build using 'just'
-    # We set environment variables to force Cargo (called by Just) 
-    # to use the Zig linker for our target.
+    # 5. Build using 'just'
+    # We use environment variables to inject the Zig linker into Cargo
     - name: Build with Just
       env:
         # Force the target architecture
         CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
         
-        # Force static linking
-        RUSTFLAGS: "-C target-feature=+crt-static"
-        
-        # TELL CARGO TO USE ZIG AS THE LINKER for this target
-        # This overrides the default linker so we get OpenWrt compatibility
+        # Configure Zig as the linker for musl
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: "zig"
-        # Arguments for Zig to behave like a C compiler/linker
+        # Flags to make Zig behave like cc for this target
+        # Note: We repeat crt-static to be sure
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-C target-feature=+crt-static -C linker=zig -C link-arg=-cc -C link-arg=-target -C link-arg=x86_64-linux-musl"
       
-      # The command you requested
-      # We add --release if the justfile allows arguments, or rely on env var if not.
-      # Assuming 'just --all-features' builds release or you can pass 'release' to it.
-      run: just all-features 
+      # Now this should work because 'cargo-workspaces' is installed
+      run: just --all-features 
 
-    # 5. Prepare Artifacts
+    # 6. Prepare Artifacts
     - name: Prepare Artifacts
       run: |
         mkdir -p staging
         
-        # Check standard release path
-        # Note: Just might output to target/release or target/<arch>/release
+        # Locate the binary (Just/Workspaces might output to a workspace target dir)
         BINARY_NAME="hickory-dns"
         
-        # Find the binary (since just might put it in different spots depending on config)
-        SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "release" | head -n 1)
+        # Find the release binary in the target folder
+        SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "x86_64-unknown-linux-musl/release" | head -n 1)
         
+        if [ -z "$SOURCE" ]; then
+             # Fallback search
+             SOURCE=$(find target -name "$BINARY_NAME" -type f | grep "release" | head -n 1)
+        fi
+
         if [ -z "$SOURCE" ]; then 
-            echo "Error: Binary '$BINARY_NAME' not found in target folder."
+            echo "Error: Binary '$BINARY_NAME' not found."
             exit 1
         fi
         
@@ -77,7 +80,7 @@ jobs:
         
         ls -lh staging/
 
-    # 6. Upload
+    # 7. Upload
     - name: Upload OpenWrt Binary
       uses: actions/upload-artifact@v4
       with:
