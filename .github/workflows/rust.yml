@@ -47,7 +47,7 @@ jobs:
         path: target
         key: ${{ runner.os }}-target-musl-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Build hickory-dns with DNS-over-HTTPS
+    - name: Build hickory-dns with DNS-over-HTTPS (ring)
       env:
         RUSTFLAGS: '-C target-feature=+crt-static -C link-arg=-static'
       run: |
@@ -56,7 +56,7 @@ jobs:
           --locked \
           --target x86_64-unknown-linux-musl \
           --package hickory-dns \
-          --features dns-over-https-rustls,dnssec-ring,resolver \
+          --features https-ring,dnssec-ring,resolver \
           --no-default-features
 
     - name: Strip binary
@@ -65,7 +65,7 @@ jobs:
     - name: Verify static linking
       run: |
         file target/x86_64-unknown-linux-musl/release/hickory-dns
-        ldd target/x86_64-unknown-linux-musl/release/hickory-dns || echo "✓ Static binary (no dynamic dependencies)"
+        ldd target/x86_64-unknown-linux-musl/release/hickory-dns || echo "✓ Static binary"
 
     - name: Test binary runs
       run: target/x86_64-unknown-linux-musl/release/hickory-dns --version
