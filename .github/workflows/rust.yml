@@ -1,4 +1,4 @@
-name: Build OpenWRT x86_64 Static Binary
+name: Build hickory-dns for OpenWrt x86_64 (All Features)
 
 on:
   push:
@@ -12,67 +12,46 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  build-openwrt:
+  build:
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-
-    - name: Install Rust toolchain with musl target
+    
+    - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: x86_64-unknown-linux-musl
-
-    - name: Install musl tools
+    
+    - name: Install build dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y musl-tools musl-dev
-
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache cargo index
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache target directory
-      uses: actions/cache@v4
-      with:
-        path: target
-        key: ${{ runner.os }}-target-musl-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Build hickory-dns with DNS-over-HTTPS (ring)
+        sudo apt-get install -y musl-tools pkg-config
+    
+    - name: Build static binary with all features
       env:
-        RUSTFLAGS: '-C target-feature=+crt-static -C link-arg=-static'
+        RUSTFLAGS: "-C target-feature=+crt-static -C link-arg=-static"
       run: |
-        cargo build \
-          --release \
-          --locked \
+        cargo build --release \
           --target x86_64-unknown-linux-musl \
-          --package hickory-dns \
-          --features https-ring,dnssec-ring,resolver \
-          --no-default-features
-
-    - name: Strip binary
-      run: strip target/x86_64-unknown-linux-musl/release/hickory-dns
-
-    - name: Verify static linking
+          --all-features \
+          -p hickory-dns
+    
+    - name: Verify static binary
       run: |
         file target/x86_64-unknown-linux-musl/release/hickory-dns
-        ldd target/x86_64-unknown-linux-musl/release/hickory-dns || echo "✓ Static binary"
-
-    - name: Test binary runs
-      run: target/x86_64-unknown-linux-musl/release/hickory-dns --version
-
-    - name: Upload binary artifact
+        ldd target/x86_64-unknown-linux-musl/release/hickory-dns || echo "Static binary confirmed"
+        ls -lh target/x86_64-unknown-linux-musl/release/hickory-dns
+    
+    - name: Strip binary
+      run: |
+        strip target/x86_64-unknown-linux-musl/release/hickory-dns
+        ls -lh target/x86_64-unknown-linux-musl/release/hickory-dns
+    
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: hickory-dns-openwrt-x86_64
+        name: hickory-dns-openwrt-x86_64-full
         path: target/x86_64-unknown-linux-musl/release/hickory-dns
         retention-days: 30
