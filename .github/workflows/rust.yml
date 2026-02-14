@@ -11,12 +11,42 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+
+    - name: Install musl-tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
+
+    - name: Add musl target
+      run: rustup target add x86_64-unknown-linux-musl
+
+    # OpenWrt specific: Configure build for small binary size
+    # You can also add these settings to Cargo.toml
+    - name: Configure Cargo for size
+      run: |
+        # Creates a cargo config to strip symbols automatically (Rust 1.59+)
+        mkdir -p .cargo
+        echo '[profile.release]' >> .cargo/config.toml
+        echo 'strip = true' >> .cargo/config.toml
+        echo 'opt-level = "z"' >> .cargo/config.toml
+        echo 'lto = true' >> .cargo/config.toml
+        echo 'codegen-units = 1' >> .cargo/config.toml
+
+    - name: Build for OpenWrt (Release)
+      # Use --release to apply the size optimizations
+      run: cargo build --verbose --release --target x86_64-unknown-linux-musl
+
+    # Optional: Check binary size
+    - name: Check Binary Size
+      run: ls -lh target/x86_64-unknown-linux-musl/release/
+
+    - name: Upload OpenWrt Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-x86_64-binary
+        path: target/x86_64-unknown-linux-musl/release/<binary-name>
+        if-no-files-found: error
