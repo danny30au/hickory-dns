@@ -54,7 +54,7 @@ jobs:
         with:
           key: openwrt-x86_64
 
-      - name: Build hickory-dns (release, musl static)
+      - name: Build hickory-dns (release, musl static, all compatible features)
         env:
           # Ensure C deps (if any) link against musl
           CC_x86_64_unknown_linux_musl: musl-gcc
@@ -62,12 +62,19 @@ jobs:
           # Produce a fully static binary
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: |
+          # NOTE: `--all-features` cannot be used because hickory-dns exposes
+          # mutually exclusive crypto backends (the `*-aws-lc-rs` family vs.
+          # the `*-ring` family). We enable the maximal non-conflicting set,
+          # using the `ring` backend (best portability under musl/OpenWrt) and
+          # skip features unsuited for OpenWrt (`systemd`, `jemalloc*`).
           cargo build \
             --release \
             --locked \
             --target "${RUST_TARGET}" \
             --package hickory-dns \
-            --bin hickory-dns
+            --bin hickory-dns \
+            --no-default-features \
+            --features "ascii-art,blocklist,recursor,resolver,sqlite,metrics,prometheus-metrics,tls-ring,https-ring,quic-ring,dnssec-ring,webpki-roots"
 
       - name: Strip and stage artifact
         run: |
