@@ -101,6 +101,7 @@ impl<P: RuntimeProvider> ConnectionProvider for P {
             (ProtocolConfig::Tcp, _) => Ok(Box::pin(TcpClientStream::exchange(
                 remote_addr,
                 config.bind_addr,
+                cx.options.connect_timeout,
                 cx.options.timeout,
                 Some(cx.options.max_active_requests),
                 self.clone(),
@@ -119,17 +120,16 @@ impl<P: RuntimeProvider> ConnectionProvider for P {
                     server_name,
                     cx.tls.clone(),
                     cx.options.timeout,
+                    cx.options.connect_timeout,
                     Some(cx.options.max_active_requests),
                     self.clone(),
                 )))
             }
             #[cfg(feature = "__https")]
             (ProtocolConfig::Https { server_name, path }, _) => Ok(Box::pin(
-                HttpsClientStream::builder(Arc::new(cx.tls.clone()), self.clone()).exchange(
-                    remote_addr,
-                    server_name.clone(),
-                    path.clone(),
-                ),
+                HttpsClientStream::builder(Arc::new(cx.tls.clone()), self.clone())
+                    .connect_timeout(cx.options.connect_timeout)
+                    .exchange(remote_addr, server_name.clone(), path.clone()),
             )),
 
             #[cfg(feature = "__quic")]
@@ -142,6 +142,7 @@ impl<P: RuntimeProvider> ConnectionProvider for P {
                 Ok(Box::pin(
                     QuicClientStream::builder()
                         .crypto_config(cx.tls.clone())
+                        .connect_timeout(cx.options.connect_timeout)
                         .exchange(
                             binder.bind_quic(bind_addr, remote_addr)?,
                             remote_addr,
@@ -168,6 +169,7 @@ impl<P: RuntimeProvider> ConnectionProvider for P {
                     H3ClientStream::builder()
                         .crypto_config(cx.tls.clone())
                         .disable_grease(*disable_grease)
+                        .connect_timeout(cx.options.connect_timeout)
                         .exchange(
                             binder.bind_quic(bind_addr, remote_addr)?,
                             remote_addr,
