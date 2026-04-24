@@ -73,7 +73,7 @@ jobs:
             --target "${RUST_TARGET}" \
             --package hickory-dns \
             --bin hickory-dns \
-            --no-default-features \
+            --all-features \
             --features "ascii-art,blocklist,recursor,resolver,sqlite,metrics,prometheus-metrics,tls-ring,https-ring,quic-ring,dnssec-ring,webpki-roots"
 
       - name: Strip and stage artifact
