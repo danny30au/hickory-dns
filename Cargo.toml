@@ -58,7 +58,7 @@ futures-channel = { version = "0.3.32", default-features = false }
 futures-executor = { version = "0.3.32", default-features = false }
 futures-io = { version = "0.3.32", default-features = false }
 futures-util = { version = "0.3.32", default-features = false }
-tokio = "1.52"
+tokio = "1.52.1"
 tokio-util = "0.7.18"
 parking_lot = "0.12"
 pin-project-lite = "0.2"
