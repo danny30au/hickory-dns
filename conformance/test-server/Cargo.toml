@@ -6,10 +6,10 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
-clap = { version = "4.0", features = ["derive", "std"] }
-data-encoding = "2.9"
+clap = { version = "4.6", features = ["derive", "std"] }
+data-encoding = "2.11"
 futures = { version = "0.3", default-features = false }
 hickory-proto = { version = "=0.27.0-alpha.1", path = "../../crates/proto", default-features = false, features = ["std"] }
 hickory-net = { version = "=0.27.0-alpha.1", path = "../../crates/net", default-features = false, features = ["dnssec-aws-lc-rs", "tokio"] }
-tokio = { version = "1.21", features = ["macros", "net", "io-util", "rt-multi-thread"] }
+tokio = { version = "1.52", features = ["macros", "net", "io-util", "rt-multi-thread"] }
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
