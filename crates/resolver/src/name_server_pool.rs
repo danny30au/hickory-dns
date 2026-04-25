@@ -142,7 +142,7 @@ impl<P: ConnectionProvider> DnsHandle for NameServerPool<P> {
     type Runtime = P::RuntimeProvider;
 
     fn lookup(&self, query: Query, mut options: DnsRequestOptions) -> Self::Response {
-        debug!("querying: {} {:?}", query.name(), query.query_type());
+        debug!("querying: {} {:?}", query.name, query.query_type);
         options.case_randomization = self.state.cx.options.case_randomization;
         self.send(DnsRequest::from_query(query, options))
     }
@@ -1027,7 +1027,7 @@ mod tests {
                 io_loop
                     .block_on(
                         pool.lookup(
-                            Query::query(name.clone(), RecordType::A),
+                            Query::new(name.clone(), RecordType::A),
                             DnsRequestOptions::default()
                         )
                         .first_answer()
@@ -1043,7 +1043,7 @@ mod tests {
                 io_loop
                     .block_on(
                         pool.lookup(
-                            Query::query(name.clone(), RecordType::A),
+                            Query::new(name.clone(), RecordType::A),
                             DnsRequestOptions::default()
                         )
                         .first_answer()
@@ -1078,7 +1078,7 @@ mod tests {
         // first lookup
         let response = pool
             .lookup(
-                Query::query(name.clone(), RecordType::A),
+                Query::new(name.clone(), RecordType::A),
                 DnsRequestOptions::default(),
             )
             .first_answer()
@@ -1095,7 +1095,7 @@ mod tests {
         // first lookup
         let response = pool
             .lookup(
-                Query::query(name, RecordType::AAAA),
+                Query::new(name, RecordType::AAAA),
                 DnsRequestOptions::default(),
             )
             .first_answer()
@@ -1160,7 +1160,7 @@ mod tests {
         // server and get the answer from the second server.
         let response = pool
             .lookup(
-                Query::query(query_name.clone(), RecordType::A),
+                Query::new(query_name.clone(), RecordType::A),
                 DnsRequestOptions::default(),
             )
             .first_answer()
@@ -1217,7 +1217,7 @@ mod tests {
         // Perform a lookup - the first server will timeout, second will succeed.
         let _response = pool
             .lookup(
-                Query::query(query_name.clone(), RecordType::A),
+                Query::new(query_name.clone(), RecordType::A),
                 DnsRequestOptions::default(),
             )
             .first_answer()
@@ -1348,7 +1348,7 @@ mod tests {
         // The good server wins the race; the unreachable server's future is cancelled.
         let _response = pool
             .lookup(
-                Query::query(query_name.clone(), RecordType::A),
+                Query::new(query_name.clone(), RecordType::A),
                 DnsRequestOptions::default(),
             )
             .first_answer()
@@ -1490,7 +1490,7 @@ mod tests {
         let start = Instant::now();
         let response = pool
             .lookup(
-                Query::query(query_name.clone(), RecordType::A),
+                Query::new(query_name.clone(), RecordType::A),
                 DnsRequestOptions::default(),
             )
             .first_answer()

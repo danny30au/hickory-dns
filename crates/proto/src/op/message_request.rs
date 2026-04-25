@@ -5,16 +5,16 @@
 // https://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+use alloc::{boxed::Box, vec::Vec};
+use core::ops::Deref;
+
+use super::{Edns, EmitAndCount, Header, LowerQuery, Message, Metadata, emit_message_parts};
 use crate::{
-    proto::{
-        ProtoError,
-        op::{Edns, EmitAndCount, Header, LowerQuery, Message, Metadata, emit_message_parts},
-        rr::{Record, rdata::TSIG},
-        serialize::binary::{
-            BinDecodable, BinDecoder, BinEncodable, BinEncoder, DecodeError, NameEncoding,
-        },
+    error::ProtoError,
+    rr::{Record, rdata::TSIG},
+    serialize::binary::{
+        BinDecodable, BinDecoder, BinEncodable, BinEncoder, DecodeError, NameEncoding,
     },
-    zone_handler::LookupError,
 };
 
 /// A Message which captures the data from an inbound request
@@ -69,12 +69,21 @@ pub struct MessageRequest {
 impl MessageRequest {
     // TODO: generify this with Message?
     /// Reads a MessageRequest from the decoder
-    pub(crate) fn read(decoder: &mut BinDecoder<'_>, header: Header) -> Result<Self, DecodeError> {
+    pub fn read(decoder: &mut BinDecoder<'_>, header: Header) -> Result<Self, DecodeError> {
+        let queries = Queries::read(decoder, header.counts.queries as usize)?;
+        Self::read_with_queries(decoder, queries, header)
+    }
+
+    /// Reads a MessageRequest from the decoder, after the [`Queries`] have already been read.
+    pub fn read_with_queries(
+        decoder: &mut BinDecoder<'_>,
+        queries: Queries,
+        header: Header,
+    ) -> Result<Self, DecodeError> {
         let Header {
             mut metadata,
             counts,
         } = header;
-        let queries = Queries::read(decoder, counts.queries as usize)?;
         let (answers, _, _) =
             Message::read_records(decoder, counts.answers as usize, false, metadata.op_code)?;
         let (authorities, _, _) = Message::read_records(
@@ -110,7 +119,7 @@ impl MessageRequest {
     pub fn mock(metadata: Metadata, query: impl Into<LowerQuery>) -> Self {
         Self {
             metadata,
-            queries: Queries::new(vec![query.into()]),
+            queries: Queries::new(query.into()),
             answers: Vec::new(),
             authorities: Vec::new(),
             additionals: Vec::new(),
@@ -135,124 +144,13 @@ impl MessageRequest {
     }
 }
 
-/// A set of Queries with the associated serialized data
-#[derive(Debug, PartialEq, Eq)]
-pub struct Queries {
-    queries: Vec<LowerQuery>,
-    original: Box<[u8]>,
-}
-
-impl Queries {
-    /// Construct a mock Queries object for a given query for testing purposes
-    #[cfg(any(test, feature = "testing"))]
-    pub fn new(query: Vec<LowerQuery>) -> Self {
-        let mut encoded = Vec::new();
-        let mut encoder = BinEncoder::new(&mut encoded);
-        for q in query.iter() {
-            q.emit(&mut encoder).unwrap();
-        }
-        Self {
-            queries: query,
-            original: encoded.into_boxed_slice(),
-        }
-    }
-
-    /// Read queries from a decoder
-    pub fn read(decoder: &mut BinDecoder<'_>, num_queries: usize) -> Result<Self, DecodeError> {
-        let queries_start = decoder.index();
-        let mut queries = Vec::with_capacity(num_queries);
-        for _ in 0..num_queries {
-            queries.push(LowerQuery::read(decoder)?);
-        }
-
-        let original = decoder
-            .slice_from(queries_start)?
-            .to_vec()
-            .into_boxed_slice();
-
-        Ok(Self { queries, original })
-    }
-
-    /// return the number of queries in the request
-    pub fn len(&self) -> usize {
-        self.queries.len()
-    }
-
-    /// Returns true if there are no queries
-    pub fn is_empty(&self) -> bool {
-        self.queries.is_empty()
-    }
-
-    /// Returns the queries from the request
-    pub fn queries(&self) -> &[LowerQuery] {
-        &self.queries
-    }
-
-    /// returns the bytes as they were seen from the Client
-    pub fn as_bytes(&self) -> &[u8] {
-        self.original.as_ref()
-    }
-
-    pub(crate) fn as_emit_and_count(&self) -> QueriesEmitAndCount<'_> {
-        QueriesEmitAndCount {
-            length: self.queries.len(),
-            // We don't generally support more than one query, but this will at least give us one
-            // cache entry.
-            first_query: self.queries.first(),
-            cached_serialized: self.original.as_ref(),
-        }
-    }
-
-    /// Validate that this set of Queries contains exactly one Query, and return a reference to the
-    /// `LowerQuery` if so.
-    pub(crate) fn try_as_query(&self) -> Result<&LowerQuery, LookupError> {
-        let count = self.queries.len();
-        if count != 1 {
-            return Err(LookupError::BadQueryCount(count));
-        }
-        Ok(&self.queries[0])
-    }
-
-    /// Construct an empty set of queries
-    pub(crate) fn empty() -> Self {
-        Self {
-            queries: Vec::new(),
-            original: (*b"").into(),
-        }
-    }
-}
-
-pub(crate) struct QueriesEmitAndCount<'q> {
-    /// Number of queries in this segment
-    length: usize,
-    /// Use the first query, if it exists, to pre-populate the string compression cache
-    first_query: Option<&'q LowerQuery>,
-    /// The cached rendering of the original (wire-format) queries
-    cached_serialized: &'q [u8],
-}
-
-impl EmitAndCount for QueriesEmitAndCount<'_> {
-    fn emit(&mut self, encoder: &mut BinEncoder<'_>) -> Result<usize, ProtoError> {
-        let original_offset = encoder.offset();
-        encoder.emit_vec(self.cached_serialized)?;
-        if matches!(encoder.name_encoding(), NameEncoding::Compressed) && self.first_query.is_some()
-        {
-            encoder.store_label_pointer(
-                original_offset,
-                original_offset + self.cached_serialized.len(),
-            )
-        }
-        Ok(self.length)
-    }
-}
-
 impl BinEncodable for MessageRequest {
     fn emit(&self, encoder: &mut BinEncoder<'_>) -> Result<(), ProtoError> {
         emit_message_parts(
             &self.metadata,
             // we emit the queries, not the raw bytes, in order to guarantee canonical form
             //   in cases where that's necessary, like SIG0 validation
-            &mut self.queries.queries.iter(),
+            &mut [&self.queries.inner].into_iter(),
             &mut self.answers.iter(),
             &mut self.authorities.iter(),
             &mut self.additionals.iter(),
@@ -265,50 +163,84 @@ impl BinEncodable for MessageRequest {
     }
 }
 
-/// A type which represents an MessageRequest for dynamic Update.
-pub trait UpdateRequest {
-    /// Id of the Message
-    fn id(&self) -> u16;
-
-    /// Zone being updated, this should be the query of a Message
-    fn zone(&self) -> Result<&LowerQuery, LookupError>;
-
-    /// Prerequisites map to the Answer section of a Message
-    fn prerequisites(&self) -> &[Record];
-
-    /// Records to update map to the Authority section of a Message
-    fn updates(&self) -> &[Record];
-
-    /// Additional records
-    fn additionals(&self) -> &[Record];
-
-    /// Signature for verifying the Message
-    fn signature(&self) -> Option<&Record<TSIG>>;
+/// A set of Queries with the associated serialized data
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Queries {
+    /// The parsed query data
+    inner: LowerQuery,
+    original: Box<[u8]>,
 }
 
-impl UpdateRequest for MessageRequest {
-    fn id(&self) -> u16 {
-        self.metadata.id
+impl Queries {
+    /// Read queries from a decoder
+    pub fn read(decoder: &mut BinDecoder<'_>, num_queries: usize) -> Result<Self, DecodeError> {
+        if num_queries != 1 {
+            // In the DNS, QDCOUNT Is (Usually) One
+            // <https://www.rfc-editor.org/rfc/rfc9619.html>
+            return Err(DecodeError::BadQueryCount(num_queries));
+        }
+
+        let queries_start = decoder.index();
+        let inner = LowerQuery::read(decoder)?;
+        let original = decoder
+            .slice_from(queries_start)?
+            .to_vec()
+            .into_boxed_slice();
+
+        Ok(Self { inner, original })
     }
 
-    fn zone(&self) -> Result<&LowerQuery, LookupError> {
-        // RFC 2136 says "the Zone Section is allowed to contain exactly one record."
-        self.queries.try_as_query()
+    /// Construct a mock Queries object for a given query for testing purposes
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new(inner: LowerQuery) -> Self {
+        let mut encoded = Vec::new();
+        let mut encoder = BinEncoder::new(&mut encoded);
+        inner.emit(&mut encoder).unwrap();
+
+        Self {
+            inner,
+            original: encoded.into_boxed_slice(),
+        }
     }
 
-    fn prerequisites(&self) -> &[Record] {
-        &self.answers
+    /// Helper for encoding the queries in a MessageRequest.
+    pub fn as_emit_and_count(&self) -> QueriesEmitAndCount<'_> {
+        QueriesEmitAndCount::Some(&self.original)
     }
 
-    fn updates(&self) -> &[Record] {
-        &self.authorities
+    /// returns the bytes as they were seen from the Client
+    pub fn as_bytes(&self) -> &[u8] {
+        self.original.as_ref()
     }
+}
 
-    fn additionals(&self) -> &[Record] {
-        &self.additionals
+impl Deref for Queries {
+    type Target = LowerQuery;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
+}
 
-    fn signature(&self) -> Option<&Record<TSIG>> {
-        self.signature.as_deref()
+/// A helper struct to emit the queries in a [`MessageRequest`].
+pub enum QueriesEmitAndCount<'q> {
+    /// Original query encoding
+    Some(&'q [u8]),
+    /// No queries to emit
+    None,
+}
+
+impl EmitAndCount for QueriesEmitAndCount<'_> {
+    fn emit(&mut self, encoder: &mut BinEncoder<'_>) -> Result<usize, ProtoError> {
+        let QueriesEmitAndCount::Some(original) = self else {
+            return Ok(0);
+        };
+
+        let original_offset = encoder.offset();
+        encoder.emit_vec(original)?;
+        if matches!(encoder.name_encoding(), NameEncoding::Compressed) {
+            encoder.store_label_pointer(original_offset, original_offset + original.len())
+        }
+        Ok(1)
     }
 }

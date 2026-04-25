@@ -196,7 +196,7 @@ impl Message {
             return self;
         }
 
-        let Some(query_type) = self.queries.first().map(|q| q.query_type()) else {
+        let Some(query_type) = self.queries.first().map(|q| q.query_type) else {
             return self; // No query, return unchanged
         };
 
@@ -787,7 +787,7 @@ mod tests {
         message.metadata.recursion_desired = true;
         message.metadata.recursion_available = true;
         message.metadata.response_code = ResponseCode::ServFail;
-        message.add_query(Query::new());
+        message.add_query(Query::root());
 
         test_emit_and_read(message);
     }
