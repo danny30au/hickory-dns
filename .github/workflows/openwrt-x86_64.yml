@@ -70,7 +70,6 @@ jobs:
           # skip features unsuited for OpenWrt (`systemd`, `jemalloc*`).
           cargo build \
             --release \
-            --locked \
             --target "${RUST_TARGET}" \
             --package hickory-dns \
             --bin hickory-dns \
