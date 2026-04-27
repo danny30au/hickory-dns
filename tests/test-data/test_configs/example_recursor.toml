@@ -17,7 +17,7 @@
 [udp_socket]
 recv_buffer_size = 8388608  # 8MB
 send_buffer_size = 8388608  # 8MB
-sockets = 8
+sockets = 8                 # one SO_REUSEPORT socket per hardware thread
 
 ## TCP socket configuration
 ## Under high connection rates, increasing the listen backlog can help prevent
@@ -39,8 +39,8 @@ sockets = 8
 ##  - response_buffer_size = 1024 keeps each TCP connection from blocking
 ##    when many responses are produced concurrently.
 [tcp_socket]
-listen_backlog = 1024
-response_buffer_size = 1024
+listen_backlog = 1024       # absorb SYN bursts across 8 workers
+response_buffer_size = 1024 # avoid backpressure-induced response drops
 
 ## Default zones, these should be present on all nameservers, except in rare
 ##  configuration cases
