@@ -7,10 +7,17 @@
 ## (e.g., net.core.rmem_max and net.core.wmem_max on Linux).
 ##
 ## For socket count, if not specified, 1 socket is used.
-# [udp_socket]
-# recv_buffer_size = 4194304  # 4MB
-# send_buffer_size = 4194304  # 4MB
-# sockets = 1
+##
+## Tuned defaults below target a 4-core / 8-thread CPU:
+##  - sockets = 8 distributes packets across SO_REUSEPORT sockets, one per
+##    hardware thread, so every worker can receive in parallel.
+##  - 8 MB send/recv buffers absorb burst traffic without dropping packets;
+##    raise net.core.rmem_max / net.core.wmem_max on Linux to at least this
+##    value or the kernel will silently cap the buffer.
+[udp_socket]
+recv_buffer_size = 8388608  # 8MB
+send_buffer_size = 8388608  # 8MB
+sockets = 8
 
 ## TCP socket configuration
 ## Under high connection rates, increasing the listen backlog can help prevent
@@ -25,9 +32,15 @@
 ## response_buffer_size: maximum number of responses that can be queued for
 ##   sending on a single TCP connection. Increase this for high-throughput
 ##   deployments to prevent responses from being dropped. Defaults to 32.
-# [tcp_socket]
-# listen_backlog = 128
-# response_buffer_size = 1024
+##
+## Tuned defaults below target a 4-core / 8-thread CPU:
+##  - listen_backlog = 1024 absorbs SYN bursts on 8 worker threads; on Linux
+##    raise net.core.somaxconn and net.ipv4.tcp_max_syn_backlog to >= 1024.
+##  - response_buffer_size = 1024 keeps each TCP connection from blocking
+##    when many responses are produced concurrently.
+[tcp_socket]
+listen_backlog = 1024
+response_buffer_size = 1024
 
 ## Default zones, these should be present on all nameservers, except in rare
 ##  configuration cases
