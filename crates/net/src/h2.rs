@@ -1,12 +1,3 @@
-// Copyright 2015-2018 Benjamin Fry <benjaminfry@me.com>
-//
-// Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
-// https://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
-// https://opensource.org/licenses/MIT>, at your option. This file may not be
-// copied, modified, or distributed except according to those terms.
-
-//! TLS protocol related components for DNS over HTTPS (DoH)
-
 use core::fmt::Debug;
 use core::future::Future;
 use core::net::SocketAddr;
@@ -35,7 +26,6 @@ use crate::runtime::iocompat::AsyncIoStdAsTokio;
 use crate::runtime::{DnsTcpStream, RuntimeProvider, Spawn};
 use crate::xfer::{CONNECT_TIMEOUT, DnsExchange, DnsRequestSender, DnsResponseStream};
 
-/// A DNS client connection for DNS-over-HTTPS
 #[derive(Clone)]
 #[must_use = "futures do nothing unless polled"]
 pub struct HttpsClientStream {
@@ -45,7 +35,6 @@ pub struct HttpsClientStream {
 }
 
 impl HttpsClientStream {
-    /// Constructs a new HttpsClientStreamBuilder with the associated ClientConfig
     pub fn builder<P: RuntimeProvider>(
         client_config: Arc<ClientConfig>,
         provider: P,
@@ -61,63 +50,11 @@ impl HttpsClientStream {
 }
 
 impl DnsRequestSender for HttpsClientStream {
-    /// This indicates that the HTTP message was successfully sent, and we now have the response.RecvStream
-    ///
-    /// If the request fails, this will return the error, and it should be assumed that the Stream portion of
-    ///   this will have no date.
-    ///
-    /// ```text
-    /// RFC 8484              DNS Queries over HTTPS (DoH)          October 2018
-    ///
-    ///
-    /// 4.2.  The HTTP Response
-    ///
-    ///    The only response type defined in this document is "application/dns-
-    ///    message", but it is possible that other response formats will be
-    ///    defined in the future.  A DoH server MUST be able to process
-    ///    "application/dns-message" request messages.
-    ///
-    ///    Different response media types will provide more or less information
-    ///    from a DNS response.  For example, one response type might include
-    ///    information from the DNS header bytes while another might omit it.
-    ///    The amount and type of information that a media type gives are solely
-    ///    up to the format, which is not defined in this protocol.
-    ///
-    ///    Each DNS request-response pair is mapped to one HTTP exchange.  The
-    ///    responses may be processed and transported in any order using HTTP's
-    ///    multi-streaming functionality (see Section 5 of [RFC7540]).
-    ///
-    ///    Section 5.1 discusses the relationship between DNS and HTTP response
-    ///    caching.
-    ///
-    /// 4.2.1.  Handling DNS and HTTP Errors
-    ///
-    ///    DNS response codes indicate either success or failure for the DNS
-    ///    query.  A successful HTTP response with a 2xx status code (see
-    ///    Section 6.3 of [RFC7231]) is used for any valid DNS response,
-    ///    regardless of the DNS response code.  For example, a successful 2xx
-    ///    HTTP status code is used even with a DNS message whose DNS response
-    ///    code indicates failure, such as SERVFAIL or NXDOMAIN.
-    ///
-    ///    HTTP responses with non-successful HTTP status codes do not contain
-    ///    replies to the original DNS question in the HTTP request.  DoH
-    ///    clients need to use the same semantic processing of non-successful
-    ///    HTTP status codes as other HTTP clients.  This might mean that the
-    ///    DoH client retries the query with the same DoH server, such as if
-    ///    there are authorization failures (HTTP status code 401; see
-    ///    Section 3.1 of [RFC7235]).  It could also mean that the DoH client
-    ///    retries with a different DoH server, such as for unsupported media
-    ///    types (HTTP status code 415; see Section 6.5.13 of [RFC7231]), or
-    ///    where the server cannot generate a representation suitable for the
-    ///    client (HTTP status code 406; see Section 6.5.6 of [RFC7231]), and so
-    ///    on.
-    /// ```
     fn send_message(&mut self, mut request: DnsRequest) -> DnsResponseStream {
         if self.is_shutdown {
             panic!("can not send messages after stream is shutdown")
         }
 
-        // per the RFC, a zero id allows for the HTTP packet to be cached better
         request.metadata.id = 0;
 
         let bytes = match request.to_vec() {
@@ -150,7 +87,6 @@ impl Stream for HttpsClientStream {
             return Poll::Ready(None);
         }
 
-        // just checking if the connection is ok
         match self.h2.poll_ready(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Some(Ok(()))),
             Poll::Pending => Poll::Pending,
@@ -161,7 +97,6 @@ impl Stream for HttpsClientStream {
     }
 }
 
-/// A HTTPS connection builder for DNS-over-HTTPS
 #[derive(Clone)]
 pub struct HttpsClientStreamBuilder<P> {
     provider: P,
@@ -172,25 +107,19 @@ pub struct HttpsClientStreamBuilder<P> {
 }
 
 impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
-    /// Sets the address to connect from.
     pub fn bind_addr(&mut self, bind_addr: SocketAddr) {
         self.bind_addr = Some(bind_addr);
     }
 
-    /// Set the [`SetHeaders`] trait object used to inject dynamic headers into the DoH request
     pub fn set_headers(&mut self, headers: Arc<dyn SetHeaders>) {
         self.set_headers.replace(headers);
     }
 
-    /// Override the connect timeout (default: 2 seconds).
-    ///
-    /// This controls both the TCP connect and the HTTP/2 handshake timeouts.
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
         self
     }
 
-    /// Creates a new [`DnsExchange`] wrapping the [`HttpsClientStream`] from this builder
     pub async fn exchange(
         self,
         name_server: SocketAddr,
@@ -204,13 +133,6 @@ impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
         Ok(exchange)
     }
 
-    /// Creates a new HttpsStream to the specified name_server
-    ///
-    /// # Arguments
-    ///
-    /// * `name_server` - IP and Port for the remote DNS resolver
-    /// * `dns_name` - The DNS name associated with a certificate
-    /// * `http_endpoint` - The HTTP endpoint where the remote DNS resolver provides service, typically `/dns-query`
     pub fn build(
         self,
         name_server: SocketAddr,
@@ -229,7 +151,6 @@ impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
     }
 }
 
-/// Creates a new HttpsStream with existing connection
 pub fn connect(
     tcp: impl Future<Output = Result<impl DnsTcpStream, io::Error>> + Send + 'static,
     mut client_config: Arc<ClientConfig>,
@@ -239,7 +160,6 @@ pub fn connect(
     set_headers: Option<Arc<dyn SetHeaders>>,
     connect_timeout: Duration,
 ) -> impl Future<Output = Result<HttpsClientStream, NetError>> + Send + 'static {
-    // ensure the ALPN protocol is set correctly
     if client_config.alpn_protocols.is_empty() {
         let mut client_cfg = (*client_config).clone();
         client_cfg.alpn_protocols = vec![ALPN_H2.to_vec()];
@@ -280,7 +200,7 @@ pub fn connect(
         .map_err(|_| NetError::Timeout)??;
 
         debug!("h2 connection established to: {name_server}");
-        tokio::spawn(async {
+        tokio::spawn(async move {
             if let Err(e) = driver.await {
                 warn!("h2 connection failed: {e}");
             }
@@ -302,19 +222,16 @@ async fn send(
     let mut h2 = match h2.ready().await {
         Ok(h2) => h2,
         Err(err) => {
-            // TODO: make specific error
             return Err(NetError::from(format!("h2 send_request error: {err}")));
         }
     };
 
-    // build up the http request
     let request = cx
         .build(message.remaining())
         .map_err(|err| NetError::from(format!("bad http request: {err}")))?;
 
     debug!("request: {:#?}", request);
 
-    // Send the request
     let (response_future, mut send_stream) = h2
         .send_request(request, false)
         .map_err(|err| NetError::from(format!("h2 send_request error: {err}")))?;
@@ -329,7 +246,6 @@ async fn send(
 
     debug!("got response: {:#?}", response_stream);
 
-    // get the length of packet
     let content_length = response_stream
         .headers()
         .get(CONTENT_LENGTH)
@@ -340,20 +256,28 @@ async fn send(
         .transpose()
         .map_err(|e| NetError::from(format!("bad headers received: {e}")))?;
 
-    // TODO: what is a good max here?
-    // clamp(512, 4096) says make sure it is at least 512 bytes, and min 4096 says it is at most 4k
-    // just a little protection from malicious actors.
-    let mut response_bytes =
-        BytesMut::with_capacity(content_length.unwrap_or(512).clamp(512, 4_096));
+    const MAX_DOH_BODY: usize = 64 * 1024;
+    let initial_capacity = content_length
+        .unwrap_or(4096)
+        .min(MAX_DOH_BODY)
+        .max(512);
+    let mut response_bytes = BytesMut::with_capacity(initial_capacity);
 
     while let Some(partial_bytes) = response_stream.body_mut().data().await {
         let partial_bytes =
             partial_bytes.map_err(|e| NetError::from(format!("bad http request: {e}")))?;
 
         debug!("got bytes: {}", partial_bytes.len());
-        response_bytes.extend(partial_bytes);
+        response_bytes.extend_from_slice(&partial_bytes);
 
-        // assert the length
+        if response_bytes.len() > MAX_DOH_BODY {
+            return Err(NetError::from(format!(
+                "response too large: {} bytes (max {})",
+                response_bytes.len(),
+                MAX_DOH_BODY
+            )));
+        }
+
         if let Some(content_length) = content_length {
             if response_bytes.len() >= content_length {
                 break;
@@ -361,10 +285,8 @@ async fn send(
         }
     }
 
-    // assert the length
     if let Some(content_length) = content_length {
         if response_bytes.len() != content_length {
-            // TODO: make explicit error type
             return Err(NetError::from(format!(
                 "expected byte length: {}, got: {}",
                 content_length,
@@ -373,49 +295,37 @@ async fn send(
         }
     }
 
-    // Was it a successful request?
     if !response_stream.status().is_success() {
         let error_string = String::from_utf8_lossy(response_bytes.as_ref());
 
-        // TODO: make explicit error type
         return Err(NetError::from(format!(
             "http unsuccessful code: {}, message: {}",
             response_stream.status(),
             error_string
         )));
     } else {
-        // verify content type
-        {
-            // in the case that the ContentType is not specified, we assume it's the standard DNS format
-            let content_type = response_stream
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .map(|h| {
-                    h.to_str().map_err(|err| {
-                        // TODO: make explicit error type
-                        NetError::from(format!("ContentType header not a string: {err}"))
-                    })
+        let content_type = response_stream
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|h| {
+                h.to_str().map_err(|err| {
+                    NetError::from(format!("ContentType header not a string: {err}"))
                 })
-                .unwrap_or(Ok(crate::http::MIME_APPLICATION_DNS))?;
+            })
+            .unwrap_or(Ok(crate::http::MIME_APPLICATION_DNS))?;
 
-            if content_type != crate::http::MIME_APPLICATION_DNS {
-                return Err(NetError::from(format!(
-                    "ContentType unsupported (must be '{}'): '{}'",
-                    crate::http::MIME_APPLICATION_DNS,
-                    content_type
-                )));
-            }
+        if content_type != crate::http::MIME_APPLICATION_DNS {
+            return Err(NetError::from(format!(
+                "ContentType unsupported (must be '{}'): '{}'",
+                crate::http::MIME_APPLICATION_DNS,
+                content_type
+            )));
         }
     };
 
-    // and finally convert the bytes into a DNS message
     DnsResponse::from_buffer(response_bytes.to_vec()).map_err(NetError::from)
 }
 
-/// Given an HTTP request, return a future that will result in the next sequence of bytes.
-///
-/// To allow downstream clients to do something interesting with the lifetime of the bytes, this doesn't
-///   perform a conversion to a Message, only collects all the bytes.
 pub async fn message_from<R>(
     this_server_name: Option<Arc<str>>,
     this_server_endpoint: Arc<str>,
@@ -437,7 +347,6 @@ where
         Err(err) => return Err(err),
     }
 
-    // attempt to get the content length
     let mut content_length = None;
     if let Some(length) = request.headers().get(CONTENT_LENGTH) {
         let length = usize::from_str(length.to_str()?)?;
@@ -452,7 +361,6 @@ where
     }
 }
 
-/// Deserialize the message from a POST message
 pub(crate) async fn message_from_post<R>(
     mut request_stream: R,
     length: Option<usize>,
@@ -460,15 +368,21 @@ pub(crate) async fn message_from_post<R>(
 where
     R: Stream<Item = Result<Bytes, h2::Error>> + 'static + Send + Debug + Unpin,
 {
-    let mut bytes = BytesMut::with_capacity(length.unwrap_or(0).clamp(512, 4_096));
+    const MAX_DOH_BODY: usize = 64 * 1024;
+    let initial_capacity = length.unwrap_or(4096).min(MAX_DOH_BODY).max(512);
+    let mut bytes = BytesMut::with_capacity(initial_capacity);
 
     loop {
         match request_stream.next().await {
-            Some(Ok(mut frame)) => bytes.extend_from_slice(&frame.split_off(0)),
+            Some(Ok(frame)) => {
+                bytes.extend_from_slice(&frame);
+                if bytes.len() > MAX_DOH_BODY {
+                    return Err("request too large".into());
+                }
+            }
             Some(Err(err)) => return Err(err.into()),
             None => {
                 return if let Some(length) = length {
-                    // wait until we have all the bytes
                     if bytes.len() == length {
                         Ok(bytes)
                     } else {
@@ -481,7 +395,6 @@ where
         };
 
         if let Some(length) = length {
-            // wait until we have all the bytes
             if bytes.len() == length {
                 return Ok(bytes);
             }
@@ -527,7 +440,8 @@ mod tests {
 
         let provider = TokioRuntimeProvider::new();
         let https_builder = HttpsClientStream::builder(Arc::new(client_config), provider);
-        let connect = https_builder.build(google, Arc::from("dns.google"), Arc::from("/dns-query"));
+        let connect =
+            https_builder.build(google, Arc::from("dns.google"), Arc::from("/dns-query"));
 
         let mut https = connect.await.expect("https connect failed");
 
@@ -544,8 +458,6 @@ mod tests {
                 .any(|record| matches!(record.data, RData::A(_)))
         );
 
-        //
-        // assert that the connection works for a second query
         let mut request = Message::query();
         let query = Query::new(
             Name::from_str("www.example.com.").unwrap(),
@@ -617,8 +529,6 @@ mod tests {
                 .any(|record| matches!(record.data, RData::A(_)))
         );
 
-        //
-        // assert that the connection works for a second query
         let mut request = Message::query();
         let query = Query::new(
             Name::from_str("www.example.com.").unwrap(),
@@ -689,8 +599,6 @@ mod tests {
                 .any(|record| matches!(record.data, RData::A(_)))
         );
 
-        //
-        // assert that the connection works for a second query
         let mut request = Message::query();
         let query = Query::new(
             Name::from_str("www.example.com.").unwrap(),
