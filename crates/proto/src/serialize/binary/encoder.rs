@@ -101,6 +101,8 @@ pub struct BinEncoder<'a> {
     canonical_form: bool,
     /// How names should be encoded.
     name_encoding: NameEncoding,
+    /// Number of names encoded with compression enabled.
+    pub(crate) compressed_name_count: usize,
 }
 
 impl<'a> BinEncoder<'a> {
@@ -131,6 +133,7 @@ impl<'a> BinEncoder<'a> {
             name_pointers: Vec::new(),
             canonical_form: false,
             name_encoding: NameEncoding::Compressed,
+            compressed_name_count: 0,
         }
     }
 
@@ -267,7 +270,7 @@ impl<'a> BinEncoder<'a> {
         assert!(start <= (u16::MAX as usize));
         assert!(end <= (u16::MAX as usize));
         assert!(start <= end);
-        if self.offset < 0x3FFF_usize {
+        if self.offset < 0x3FFF_usize && self.name_pointers.len() < COMPRESSION_CANDIDATE_LIMIT {
             self.name_pointers
                 .push((start, self.slice_of(start, end).to_vec())); // the next char will be at the len() location
         }
@@ -454,6 +457,13 @@ impl<'a> BinEncoder<'a> {
         }
     }
 }
+
+/// Maximum number of label pointers we will store for later use in name compression.
+///
+/// This is chosen to be a power of two, so that we use the full capacity of the backing vector.
+/// With the current limits, name compression searches make up a small portion of the time it takes
+/// to encode pathologically large messages.
+const COMPRESSION_CANDIDATE_LIMIT: usize = 64;
 
 /// Selects how names should be encoded.
 #[derive(Clone, Copy)]
