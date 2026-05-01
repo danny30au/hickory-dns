@@ -66,6 +66,7 @@ path = "src/hickory-dns.rs"
 # - `suggestions` for advanced help with error in cli
 # - `derive` for clap derive api
 # - `help` to generate --help
+mimalloc = { version = "0.1", default-features = false }
 cfg-if.workspace = true
 clap = { workspace = true, default-features = false, features = ["cargo", "derive", "help", "std", "suggestions"] }
 futures-util = { workspace = true, default-features = false, features = ["std"] }
