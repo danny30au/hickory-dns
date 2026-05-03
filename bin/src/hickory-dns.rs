@@ -29,8 +29,6 @@
 
 use mimalloc::MiMalloc;
 use clap::Parser;
-#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
-use tikv_jemallocator::Jemalloc;
 use tokio::runtime;
 use tracing::{Level, info};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -85,7 +83,5 @@ fn run() -> Result<(), String> {
 
     runtime.block_on(args.run())
 }
-
-#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
