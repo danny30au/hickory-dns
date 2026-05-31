@@ -46,7 +46,7 @@ use crate::proto::rr::Name;
 
 /// Configuration for the upstream nameservers to use for resolution
 #[non_exhaustive]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ResolverConfig {
     /// Base search domain
@@ -141,6 +141,13 @@ impl ResolverConfig {
             search,
             name_servers,
         }
+    }
+
+    /// Create a ResolverConfig from a list of name server configurations.
+    ///
+    /// No base domain for relative names will be set, and no additional search domains will be set.
+    pub fn from_name_servers(name_servers: Vec<NameServerConfig>) -> Self {
+        Self::from_parts(None, vec![], name_servers)
     }
 
     /// Take the `domain`, `search`, and `name_servers` from the config.
