@@ -56,7 +56,7 @@ jobs:
           key: openwrt-x86_64
 
       - name: Update Cargo dependencies
-        run: cargo update
+        run: cargo update --verbose
 
       - name: Build hickory-dns (release, musl static, all compatible features)
         env:
