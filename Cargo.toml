@@ -29,7 +29,7 @@ license = "MIT OR Apache-2.0"
 # hickory
 hickory-net = { version = "=0.27.0-alpha.1", path = "crates/net", default-features= false, features = "h3-aws-lc-rs"] }
 hickory-resolver = { version = "=0.27.0-alpha.1", path = "crates/resolver", default-features = false features = "h3-aws-lc-rs"] }
-hickory-server = { version = "=0.27.0-alpha.1", path = "crates/server", default-features = false, features = "h3-aws-lc-rs"]  }
+hickory-server = { version = "=0.27.0-alpha.1", path = "crates/server", default-features = false, features = "h3-aws-lc-rs"] }
 hickory-proto = { version = "=0.27.0-alpha.1", path = "crates/proto", default-features = false, features = ["std, "h3-aws-lc-rs"] }
 test-support.path = "tests/test-support"
 
