@@ -107,7 +107,7 @@ jni = "0.22.4"
 js-sys = "0.3.99"
 libc = "0.2.186"
 lru-cache = "0.1.2"
-mimalloc = { version = "v3.3.2", default-features = false }
+mimalloc = { version = "3.3.2", default-features = false }
 moka = "0.12.15"
 ndk-context = "0.1.1"
 once_cell = { version = "1.21.4", default-features = false, features = ["critical-section"] }
