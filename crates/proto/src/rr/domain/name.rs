@@ -1224,24 +1224,22 @@ impl BinEncodable for Name {
 const COMPRESSED_NAME_LIMIT: usize = 120;
 
 impl<'r> BinDecodable<'r> for Name {
-    /// parses the chain of labels
-    ///  this has a max of 255 octets, with each label being less than 63.
-    ///  all names will be stored lowercase internally.
-    /// This will consume the portions of the `Vec` which it is reading...
+    /// Parses a domain name.
+    ///
+    /// The maximum length of a name is 255 octets, and the maximum length of each label is 63.
     fn read(decoder: &mut BinDecoder<'r>) -> Result<Self, DecodeError> {
         let mut name = Self::default();
-        read_inner(decoder, &mut name, None)?;
+        read_inner(decoder, &mut name)?;
         Ok(name)
     }
 }
 
-fn read_inner(
-    decoder: &mut BinDecoder<'_>,
-    name: &mut Name,
-    max_idx: Option<usize>,
-) -> Result<(), DecodeError> {
+fn read_inner(decoder: &mut BinDecoder<'_>, name: &mut Name) -> Result<(), DecodeError> {
     let mut state: LabelParseState = LabelParseState::LabelLengthOrPointer;
-    let name_start = decoder.index();
+    let mut ptr_max_idx = None;
+    let mut decoder_tmp;
+    let mut decoder = &mut *decoder;
+    let mut name_start = decoder.index();
 
     // assume all chars are utf-8. We're doing byte-by-byte operations, no endianness issues...
     // reserved: (1000 0000 aka 0800) && (0100 0000 aka 0400)
@@ -1249,8 +1247,8 @@ fn read_inner(
     // label: 03FF & slice = length; slice.next(length) = label
     // root: 0000
     loop {
-        // this protects against overlapping labels
-        if let Some(max_idx) = max_idx {
+        // this protects against overlapping labels when chasing pointers
+        if let Some(max_idx) = ptr_max_idx {
             if decoder.index() >= max_idx {
                 return Err(DecodeError::LabelOverlapsWithOther {
                     label: name_start,
@@ -1340,11 +1338,12 @@ fn read_inner(
                         ptr: e,
                     })?;
 
-                let mut pointer = decoder.clone(location);
-                read_inner(&mut pointer, name, Some(name_start))?;
-
-                // Pointers always finish the name, break like Root.
-                break;
+                // chase the pointer
+                ptr_max_idx = Some(name_start);
+                decoder_tmp = decoder.clone(location);
+                decoder = &mut decoder_tmp;
+                name_start = decoder.index();
+                LabelParseState::LabelLengthOrPointer
             }
             LabelParseState::Root => {
                 // need to pop() the 0 off the stack...
@@ -1661,6 +1660,31 @@ mod tests {
         let mut d = BinDecoder::new(&bytes);
 
         assert!(Name::read(&mut d).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_long_pointer_chain_small_stack() {
+        // Build a buffer of the form: [0x00, ptr->0, ptr->prev, ptr->prev, ...]
+        let mut bytes = vec![0x00, 0xC0, 0x00];
+        let mut last_ptr_offset: u16 = 1;
+        for _ in 1..8000 {
+            last_ptr_offset = bytes.len() as u16 - 2;
+            bytes.extend(&u16::to_be_bytes(0xC000 | last_ptr_offset));
+        }
+
+        // Formerly a stack overflow
+        let name = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let mut decoder = BinDecoder::new(&bytes).clone(last_ptr_offset);
+                Name::read(&mut decoder).unwrap()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(name, Name::root());
     }
 
     #[test]
