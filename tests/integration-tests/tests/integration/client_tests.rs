@@ -1,18 +1,13 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 #[cfg(feature = "__dnssec")]
 use std::str::FromStr;
-#[cfg(feature = "__dnssec")]
-use std::sync::Arc;
-#[cfg(all(feature = "__dnssec", feature = "sqlite"))]
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use futures::TryStreamExt;
 #[cfg(all(feature = "__dnssec", feature = "sqlite"))]
 use time::Duration;
 
-#[cfg(all(feature = "__dnssec", feature = "sqlite"))]
 use hickory_integration::TestClientStream;
-#[cfg(all(feature = "__dnssec", feature = "sqlite"))]
 use hickory_integration::example_zone::create_example;
 use hickory_integration::{GOOGLE_V4, TEST3_V4};
 use hickory_net::NetError;
@@ -28,12 +23,13 @@ use hickory_proto::dnssec::TrustAnchors;
 #[cfg(feature = "__dnssec")]
 use hickory_proto::op::ResponseCode;
 use hickory_proto::op::{DnsRequest, Edns, Message, Query};
-use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption};
+use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption, NSIDPayload};
 use hickory_proto::rr::{DNSClass, Name, RData, RecordType, rdata::A};
 #[cfg(all(feature = "__dnssec", feature = "sqlite"))]
 use hickory_proto::rr::{Record, TSigner};
 #[cfg(all(feature = "__dnssec", feature = "sqlite"))]
-use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler};
+use hickory_server::zone_handler::AxfrPolicy;
+use hickory_server::zone_handler::{Catalog, ZoneHandler};
 use test_support::subscribe;
 
 #[cfg(all(feature = "__dnssec", feature = "sqlite"))]
@@ -92,6 +88,20 @@ async fn tcp_dnssec_client(addr: SocketAddr) -> DnssecClient {
     client
 }
 
+async fn test_client() -> Client<TokioRuntimeProvider> {
+    // Use an in-process catalog-backed stream so client tests do not depend on public DNS.
+    let handler = create_example();
+    let mut catalog = Catalog::new();
+    catalog.upsert(handler.origin().clone(), vec![Arc::new(handler)]);
+    catalog.set_nsid(Some(NSIDPayload::new(vec![0xC0, 0xFF, 0xEE]).unwrap()));
+
+    let (future, sender) = TestClientStream::new(Arc::new(StdMutex::new(catalog)));
+    let stream = future.await.expect("failed to connect");
+    let (client, driver) = Client::new(stream, sender);
+    tokio::spawn(driver);
+    client
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_query_udp() {
@@ -101,10 +111,11 @@ async fn test_query_udp() {
 }
 
 #[tokio::test]
-async fn test_query_udp_edns() {
+async fn test_query_edns() {
+    // Exercise EDNS request/response handling against the local test catalog.
     subscribe();
-    let client = udp_client(GOOGLE_V4).await;
-    test_query_edns(client).await;
+    let client = test_client().await;
+    test_query_edns_response(client).await;
 }
 
 #[tokio::test]
@@ -145,13 +156,11 @@ async fn test_query(mut client: Client<TokioRuntimeProvider>) {
     }
 }
 
-async fn test_query_edns(client: Client<TokioRuntimeProvider>) {
+async fn test_query_edns_response(client: Client<TokioRuntimeProvider>) {
+    // Send a query with an EDNS OPT record and verify the local response preserves EDNS.
+
     let name = Name::from_ascii("WWW.example.com.").unwrap();
     let mut edns = Edns::new();
-    // garbage subnet value, but lets check
-    edns.options_mut()
-        .insert(EdnsOption::Subnet("1.2.0.0/16".parse().unwrap()));
-
     // TODO: write builder
     let mut msg = Message::query();
     msg.metadata.recursion_desired = true;
@@ -162,6 +171,8 @@ async fn test_query_edns(client: Client<TokioRuntimeProvider>) {
     });
 
     edns.set_max_payload(1232).set_version(0);
+    edns.options_mut()
+        .insert(EdnsOption::NSID(NSIDPayload::new([]).unwrap()));
     msg.edns = Some(edns);
 
     let response = client
@@ -181,20 +192,26 @@ async fn test_query_edns(client: Client<TokioRuntimeProvider>) {
             .eq_case(&name)
     );
 
-    assert!(!response.answers.is_empty());
-    assert!(response.edns.is_some());
-    let subnet_option = response
-        .edns
-        .as_ref()
-        .unwrap()
-        .option(EdnsCode::Subnet)
-        .unwrap();
-    let EdnsOption::Subnet(client_subnet) = subnet_option else {
-        panic!("incorrect option type: {subnet_option:?}");
-    };
-    assert_eq!(client_subnet.addr(), IpAddr::V4(Ipv4Addr::new(1, 2, 0, 0)));
-    assert_eq!(client_subnet.source_prefix(), 16);
-    // ignore scope_prefix
+    let record = &response.answers[0];
+    assert_eq!(record.name, name);
+    assert_eq!(record.record_type(), RecordType::A);
+    assert_eq!(record.dns_class, DNSClass::IN);
+
+    if let RData::A(address) = record.data {
+        assert_eq!(address, A::new(93, 184, 215, 14));
+    } else {
+        panic!();
+    }
+
+    let edns = response.edns.as_ref().expect("expected EDNS response");
+    assert_eq!(edns.version(), 0);
+    assert_eq!(edns.max_payload(), 1232);
+    assert_eq!(
+        edns.option(EdnsCode::NSID),
+        Some(&EdnsOption::NSID(
+            NSIDPayload::new(vec![0xC0, 0xFF, 0xEE]).unwrap()
+        ))
+    );
 }
 
 #[tokio::test]
