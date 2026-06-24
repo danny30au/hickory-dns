@@ -9,6 +9,7 @@ use core::net::SocketAddr;
 use core::pin::Pin;
 use core::str::FromStr;
 use core::task::{Context, Poll};
+use std::cell::Cell;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use std::time::Duration;
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::stream::{Stream, StreamExt};
 use h2::client::SendRequest;
-use http::header::{self, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONTENT_LENGTH, USER_AGENT};
+use http::header::{self, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONTENT_LENGTH, USER_AGENT};
 use http::{Method, Request};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -47,28 +48,39 @@ const OBFS_USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ];
 
-/// Cheap non-crypto pseudorandom u64 seeded from wall-clock nanoseconds.
+thread_local! {
+    static OBFS_RNG_STATE: Cell<u64> = Cell::new(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+            .unwrap_or(0xDEAD_BEEF)
+    );
+}
+
+/// Cheap non-crypto pseudorandom u64.
 /// Statistical quality is irrelevant — used only for UA rotation and nonces.
+/// Uses thread-local state to avoid OS clock syscall overhead per request.
 #[inline]
 fn obfs_rand() -> u64 {
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0xDEAD_BEEF) as u64;
-    // xorshift64
-    let mut x = seed ^ 0x9e37_79b9_7f4a_7c15;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    x
+    OBFS_RNG_STATE.with(|state| {
+        let mut x = state.get();
+        if x == 0 { x = 0xDEAD_BEEF; }
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        state.set(x);
+        x
+    })
 }
 
 /// Pad `buf` in-place to the next multiple of `OBFS_PAD_BLOCK` bytes.
-/// Padding bytes are zeroed.
+/// Padding bytes are zeroed. Reallocation is minimized via exact reservation.
 fn obfs_pad(buf: &mut Vec<u8>) {
     let rem = buf.len() % OBFS_PAD_BLOCK;
     if rem != 0 {
-        buf.resize(buf.len() + (OBFS_PAD_BLOCK - rem), 0u8);
+        let pad_len = OBFS_PAD_BLOCK - rem;
+        buf.reserve_exact(pad_len);
+        buf.resize(buf.len() + pad_len, 0u8);
     }
 }
 
@@ -84,18 +96,17 @@ fn obfs_path(path: &str) -> String {
 }
 
 /// Inject browser-mimicry headers into a built `http::Request`.
+/// Uses HeaderValue::from_static to avoid runtime parsing overhead.
 fn obfs_inject_headers<B>(req: &mut Request<B>) {
     let ua = OBFS_USER_AGENTS[(obfs_rand() as usize) % OBFS_USER_AGENTS.len()];
     let headers = req.headers_mut();
-    headers.insert(USER_AGENT,      ua.parse().unwrap());
-    headers.insert(ACCEPT,          "application/dns-message, */*;q=0.9".parse().unwrap());
-    headers.insert(ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+    headers.insert(USER_AGENT,      HeaderValue::from_static(ua));
+    headers.insert(ACCEPT,          HeaderValue::from_static("application/dns-message, */*;q=0.9"));
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
     // "identity" avoids double-compression issues with h2 DATA frames.
-    headers.insert(ACCEPT_ENCODING, "identity".parse().unwrap());
-    headers.insert(CACHE_CONTROL,   "no-cache".parse().unwrap());
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    headers.insert(CACHE_CONTROL,   HeaderValue::from_static("no-cache"));
 }
-
-
 
 /// An established HTTPS/2 connection to a DNS-over-HTTPS name server.
 ///
@@ -327,18 +338,19 @@ async fn send(
         }
     };
 
-    // Build the request against a per-call obfuscated path (unique nonce).
-    let obfs_query_path: Arc<str> = Arc::from(obfs_path(&cx.query_path).as_str());
-    let obfs_cx = Arc::new(RequestContext {
-        version:     cx.version.clone(),
-        server_name: cx.server_name.clone(),
-        query_path:  obfs_query_path,
-        set_headers: cx.set_headers.clone(),
-    });
-
-    let mut request = obfs_cx
+    let mut request = cx
         .build(message.remaining())
         .map_err(|err| NetError::from(format!("bad http request: {err}")))?;
+
+    // Append random nonce query-param to the request URI to defeat URL classifiers.
+    // Doing this in-place avoids allocating a new Arc<str> and Arc<RequestContext>.
+    let old_uri = request.uri().clone();
+    let mut parts = old_uri.into_parts();
+    if let Some(pq) = parts.path_and_query {
+        let new_pq = obfs_path(pq.as_str());
+        parts.path_and_query = Some(new_pq.parse().unwrap());
+    }
+    *request.uri_mut() = http::Uri::from_parts(parts).unwrap();
 
     // Inject browser-mimicry headers unconditionally.
     obfs_inject_headers(&mut request);
