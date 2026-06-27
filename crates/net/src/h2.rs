@@ -3,6 +3,7 @@
 //! Provides [`HttpsClientStream`], [`HttpsClientStreamBuilder`], and the
 //! lower-level [`connect`] and [`message_from`] free functions used by the
 //! DoH transport layer.
+
 use core::fmt::Debug;
 use core::future::Future;
 use core::net::SocketAddr;
@@ -31,11 +32,12 @@ use crate::proto::op::{DnsRequest, DnsResponse};
 use crate::runtime::iocompat::AsyncIoStdAsTokio;
 use crate::runtime::{DnsTcpStream, RuntimeProvider, Spawn};
 use crate::xfer::{CONNECT_TIMEOUT, DnsExchange, DnsRequestSender, DnsResponseStream};
+
 // ---------------------------------------------------------------------------
 // Obfuscation helpers — always active, no opt-in required
 // ---------------------------------------------------------------------------
 
-/// Block size for request body padding.  Every outbound POST body is rounded
+/// Block size for request body padding. Every outbound POST body is rounded
 /// up to the next multiple of this value by appending zero bytes, masking the
 /// real DNS message length from passive observers.
 const OBFS_PAD_BLOCK: usize = 128;
@@ -85,7 +87,7 @@ fn obfs_pad(buf: &mut Vec<u8>) {
 }
 
 /// Append a random nonce query-param so every request URL is unique, e.g.
-/// `/dns-query?_=83741`.  Defeats URL-pattern classifiers.
+/// `/dns-query?_=83741`. Defeats URL-pattern classifiers.
 fn obfs_path(path: &str) -> String {
     let nonce = obfs_rand() % 100_000;
     if path.contains('?') {
@@ -107,6 +109,13 @@ fn obfs_inject_headers<B>(req: &mut Request<B>) {
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     headers.insert(CACHE_CONTROL,   HeaderValue::from_static("no-cache"));
 }
+
+// ---------------------------------------------------------------------------
+// HTTP/2 Buffer Constants
+// ---------------------------------------------------------------------------
+const MAX_DOH_BODY: usize = 64 * 1024;
+const MIN_DOH_BODY_ALLOC: usize = 512;
+const DEFAULT_DOH_BODY_ALLOC: usize = 4096;
 
 /// An established HTTPS/2 connection to a DNS-over-HTTPS name server.
 ///
@@ -139,11 +148,14 @@ impl HttpsClientStream {
 impl DnsRequestSender for HttpsClientStream {
     fn send_message(&mut self, mut request: DnsRequest) -> DnsResponseStream {
         if self.is_shutdown {
-            panic!("can not send messages after stream is shutdown")
+            let err = NetError::from(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "cannot send messages after stream is shutdown",
+            ));
+            return err.into();
         }
 
         request.metadata.id = 0;
-
         let bytes = match request.to_vec() {
             Ok(bytes) => bytes,
             Err(err) => return NetError::from(err).into(),
@@ -273,10 +285,7 @@ pub fn connect(
     connect_timeout: Duration,
 ) -> impl Future<Output = Result<HttpsClientStream, NetError>> + Send + 'static {
     if client_config.alpn_protocols.is_empty() {
-        let mut client_cfg = (*client_config).clone();
-        client_cfg.alpn_protocols = vec![ALPN_H2.to_vec()];
-
-        client_config = Arc::new(client_cfg);
+        Arc::make_mut(&mut client_config).alpn_protocols = vec![ALPN_H2.to_vec()];
     }
 
     let context = Arc::new(RequestContext {
@@ -381,11 +390,11 @@ async fn send(
         .transpose()
         .map_err(|e| NetError::from(format!("bad headers received: {e}")))?;
 
-    const MAX_DOH_BODY: usize = 64 * 1024;
     let initial_capacity = content_length
-        .unwrap_or(4096)
+        .unwrap_or(DEFAULT_DOH_BODY_ALLOC)
         .min(MAX_DOH_BODY)
-        .max(512);
+        .max(MIN_DOH_BODY_ALLOC);
+
     let mut response_bytes = BytesMut::with_capacity(initial_capacity);
 
     while let Some(partial_bytes) = response_stream.body_mut().data().await {
@@ -422,29 +431,20 @@ async fn send(
 
     if !response_stream.status().is_success() {
         let error_string = String::from_utf8_lossy(response_bytes.as_ref());
-
         return Err(NetError::from(format!(
             "http unsuccessful code: {}, message: {}",
             response_stream.status(),
             error_string
         )));
     } else {
-        let content_type = response_stream
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .map(|h| {
-                h.to_str().map_err(|err| {
-                    NetError::from(format!("ContentType header not a string: {err}"))
-                })
-            })
-            .unwrap_or(Ok(crate::http::MIME_APPLICATION_DNS))?;
-
-        if content_type != crate::http::MIME_APPLICATION_DNS {
-            return Err(NetError::from(format!(
-                "ContentType unsupported (must be '{}'): '{}'",
-                crate::http::MIME_APPLICATION_DNS,
-                content_type
-            )));
+        if let Some(content_type) = response_stream.headers().get(header::CONTENT_TYPE) {
+            if content_type.as_bytes() != crate::http::MIME_APPLICATION_DNS.as_bytes() {
+                return Err(NetError::from(format!(
+                    "ContentType unsupported (must be '{}'): {:?}",
+                    crate::http::MIME_APPLICATION_DNS,
+                    content_type
+                )));
+            }
         }
     };
 
@@ -498,8 +498,11 @@ pub(crate) async fn message_from_post<R>(
 where
     R: Stream<Item = Result<Bytes, h2::Error>> + 'static + Send + Debug + Unpin,
 {
-    const MAX_DOH_BODY: usize = 64 * 1024;
-    let initial_capacity = length.unwrap_or(4096).min(MAX_DOH_BODY).max(512);
+    let initial_capacity = length
+        .unwrap_or(DEFAULT_DOH_BODY_ALLOC)
+        .min(MAX_DOH_BODY)
+        .max(MIN_DOH_BODY_ALLOC);
+    
     let mut bytes = BytesMut::with_capacity(initial_capacity);
 
     loop {
@@ -507,19 +510,25 @@ where
             Some(Ok(frame)) => {
                 bytes.extend_from_slice(&frame);
                 if bytes.len() > MAX_DOH_BODY {
-                    return Err("request too large".into());
+                    return Err(NetError::from(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "request too large",
+                    )));
                 }
             }
             Some(Err(err)) => return Err(err.into()),
             None => {
                 return if let Some(length) = length {
                     // A padded sender may deliver more bytes than the declared
-                    // DNS content length (trailing zero padding).  Accept as
+                    // DNS content length (trailing zero padding). Accept as
                     // long as the real content fits inside the received body.
                     if bytes.len() >= length {
                         Ok(bytes.split_to(length))
                     } else {
-                        Err("not all bytes received".into())
+                        Err(NetError::from(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "not all bytes received",
+                        )))
                     }
                 } else {
                     Ok(bytes)
@@ -583,12 +592,10 @@ mod tests {
 
     // --- original tests (unchanged) ---------------------------------------
 
-
     #[cfg(any(feature = "webpki-roots", feature = "rustls-platform-verifier"))]
     #[tokio::test]
     async fn test_https_google() {
         subscribe();
-
         let google = SocketAddr::from(([8, 8, 8, 8], 443));
         let mut request = Message::query();
         let query = Query::new(Name::from_str("www.example.com.").unwrap(), RecordType::A);
@@ -600,7 +607,6 @@ mod tests {
         request.edns = Some(edns);
 
         let request = DnsRequest::new(request, DnsRequestOptions::default());
-
         let mut client_config = client_config_h2();
         client_config.key_log = Arc::new(KeyLogFile::new());
 
@@ -608,7 +614,6 @@ mod tests {
         let https_builder = HttpsClientStream::builder(Arc::new(client_config), provider);
         let connect =
             https_builder.build(google, Arc::from("dns.google"), Arc::from("/dns-query"));
-
         let mut https = connect.await.expect("https connect failed");
 
         let response = https
@@ -616,14 +621,12 @@ mod tests {
             .first_answer()
             .await
             .expect("send_message failed");
-
         assert!(
             response
                 .answers
                 .iter()
                 .any(|record| matches!(record.data, RData::A(_)))
         );
-
         let mut request = Message::query();
         let query = Query::new(
             Name::from_str("www.example.com.").unwrap(),
@@ -637,13 +640,11 @@ mod tests {
         request.edns = Some(edns);
 
         let request = DnsRequest::new(request, DnsRequestOptions::default());
-
         let response = https
             .send_message(request.clone())
             .first_answer()
             .await
             .expect("send_message failed");
-
         assert!(
             response
                 .answers
@@ -656,7 +657,6 @@ mod tests {
     #[tokio::test]
     async fn test_https_google_with_pure_ip_address_server() {
         subscribe();
-
         let google = SocketAddr::from(([8, 8, 8, 8], 443));
         let mut request = Message::query();
         let query = Query::new(Name::from_str("www.example.com.").unwrap(), RecordType::A);
@@ -668,7 +668,6 @@ mod tests {
         request.edns = Some(edns);
 
         let request = DnsRequest::new(request, DnsRequestOptions::default());
-
         let mut client_config = client_config_h2();
         client_config.key_log = Arc::new(KeyLogFile::new());
 
@@ -679,7 +678,6 @@ mod tests {
             Arc::from(google.ip().to_string()),
             Arc::from("/dns-query"),
         );
-
         let mut https = connect.await.expect("https connect failed");
 
         let response = https
@@ -687,14 +685,12 @@ mod tests {
             .first_answer()
             .await
             .expect("send_message failed");
-
         assert!(
             response
                 .answers
                 .iter()
                 .any(|record| matches!(record.data, RData::A(_)))
         );
-
         let mut request = Message::query();
         let query = Query::new(
             Name::from_str("www.example.com.").unwrap(),
@@ -708,13 +704,11 @@ mod tests {
         request.edns = Some(edns);
 
         let request = DnsRequest::new(request, DnsRequestOptions::default());
-
         let response = https
             .send_message(request.clone())
             .first_answer()
             .await
             .expect("send_message failed");
-
         assert!(
             response
                 .answers
@@ -728,7 +722,6 @@ mod tests {
     #[ignore = "cloudflare has been unreliable as a public test service"]
     async fn test_https_cloudflare() {
         subscribe();
-
         let cloudflare = SocketAddr::from(([1, 1, 1, 1], 443));
         let mut request = Message::query();
         let query = Query::new(Name::from_str("www.example.com.").unwrap(), RecordType::A);
@@ -740,7 +733,6 @@ mod tests {
         request.edns = Some(edns);
 
         let request = DnsRequest::new(request, DnsRequestOptions::default());
-
         let client_config = client_config_h2();
         let provider = TokioRuntimeProvider::new();
         let https_builder = HttpsClientStream::builder(Arc::new(client_config), provider);
@@ -749,7 +741,6 @@ mod tests {
             Arc::from("cloudflare-dns.com"),
             Arc::from("/dns-query"),
         );
-
         let mut https = connect.await.expect("https connect failed");
 
         let response = https
@@ -757,14 +748,12 @@ mod tests {
             .first_answer()
             .await
             .expect("send_message failed");
-
         assert!(
             response
                 .answers
                 .iter()
                 .any(|record| matches!(record.data, RData::A(_)))
         );
-
         let mut request = Message::query();
         let query = Query::new(
             Name::from_str("www.example.com.").unwrap(),
@@ -778,13 +767,11 @@ mod tests {
         request.edns = Some(edns);
 
         let request = DnsRequest::new(request, DnsRequestOptions::default());
-
         let response = https
             .send_message(request)
             .first_answer()
             .await
             .expect("send_message failed");
-
         assert!(
             response
                 .answers
@@ -812,7 +799,6 @@ mod tests {
             query_path: Arc::from("/dns-query"),
             set_headers: None,
         };
-
         let request = cx.build(len).unwrap();
         let request = request.map(|()| stream);
 
@@ -823,23 +809,14 @@ mod tests {
         )
         .await
         .unwrap();
-
         let msg_from_post = Message::from_vec(bytes.as_ref()).expect("bytes failed");
         assert_eq!(message, msg_from_post);
     }
 
     #[derive(Debug)]
     struct TestBytesStream(Vec<Result<Bytes, h2::Error>>);
-
     impl Stream for TestBytesStream {
         type Item = Result<Bytes, h2::Error>;
-
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             match self.0.pop() {
-                Some(Ok(bytes)) => Poll::Ready(Some(Ok(bytes))),
-                Some(Err(err)) => Poll::Ready(Some(Err(err))),
-                None => Poll::Ready(None),
-            }
-        }
-    }
-}
+                Some(Ok(bytes)) => Poll::Ready(Some(Ok(
