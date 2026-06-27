@@ -18,10 +18,13 @@ use std::time::Duration;
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::stream::{Stream, StreamExt};
 use h2::client::SendRequest;
-use http::header::{self, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONTENT_LENGTH, USER_AGENT};
+use http::header::{
+    self, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONTENT_LENGTH,
+    USER_AGENT,
+};
 use http::{Method, Request};
-use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
+use rustls::ClientConfig;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, warn};
@@ -31,7 +34,7 @@ use crate::http::{RequestContext, SetHeaders, Version};
 use crate::proto::op::{DnsRequest, DnsResponse};
 use crate::runtime::iocompat::AsyncIoStdAsTokio;
 use crate::runtime::{DnsTcpStream, RuntimeProvider, Spawn};
-use crate::xfer::{CONNECT_TIMEOUT, DnsExchange, DnsRequestSender, DnsResponseStream};
+use crate::xfer::{DnsExchange, DnsRequestSender, DnsResponseStream, CONNECT_TIMEOUT};
 
 // ---------------------------------------------------------------------------
 // Obfuscation helpers — always active, no opt-in required
@@ -66,7 +69,9 @@ thread_local! {
 fn obfs_rand() -> u64 {
     OBFS_RNG_STATE.with(|state| {
         let mut x = state.get();
-        if x == 0 { x = 0xDEAD_BEEF; }
+        if x == 0 {
+            x = 0xDEAD_BEEF;
+        }
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
@@ -102,12 +107,15 @@ fn obfs_path(path: &str) -> String {
 fn obfs_inject_headers<B>(req: &mut Request<B>) {
     let ua = OBFS_USER_AGENTS[(obfs_rand() as usize) % OBFS_USER_AGENTS.len()];
     let headers = req.headers_mut();
-    headers.insert(USER_AGENT,      HeaderValue::from_static(ua));
-    headers.insert(ACCEPT,          HeaderValue::from_static("application/dns-message, */*;q=0.9"));
+    headers.insert(USER_AGENT, HeaderValue::from_static(ua));
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/dns-message, */*;q=0.9"),
+    );
     headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
     // "identity" avoids double-compression issues with h2 DATA frames.
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
-    headers.insert(CACHE_CONTROL,   HeaderValue::from_static("no-cache"));
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
 }
 
 // ---------------------------------------------------------------------------
@@ -502,7 +510,7 @@ where
         .unwrap_or(DEFAULT_DOH_BODY_ALLOC)
         .min(MAX_DOH_BODY)
         .max(MIN_DOH_BODY_ALLOC);
-    
+
     let mut bytes = BytesMut::with_capacity(initial_capacity);
 
     loop {
@@ -815,8 +823,16 @@ mod tests {
 
     #[derive(Debug)]
     struct TestBytesStream(Vec<Result<Bytes, h2::Error>>);
+
     impl Stream for TestBytesStream {
         type Item = Result<Bytes, h2::Error>;
+        
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             match self.0.pop() {
-                Some(Ok(bytes)) => Poll::Ready(Some(Ok(
+                Some(Ok(bytes)) => Poll::Ready(Some(Ok(bytes))),
+                Some(Err(err)) => Poll::Ready(Some(Err(err))),
+                None => Poll::Ready(None),
+            }
+        }
+    }
+}
