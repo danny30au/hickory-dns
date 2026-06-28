@@ -2,8 +2,8 @@
 //
 // Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
 // https://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
-// https://opensource.org/licenses/MIT>, at your option.
-// This file may not be copied, modified, or distributed except according to those terms.
+// https://opensource.org/licenses/MIT>, at your option. This file may not be
+// copied, modified, or distributed except according to those terms.
 
 //! HTTP protocol related components for DNS over HTTP/2 (DoH) and HTTP/3 (DoH3)
 
@@ -11,61 +11,48 @@ use core::str::FromStr;
 use std::sync::Arc;
 
 use http::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE};
-use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, header, uri};
+use http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri, header, uri};
 use tracing::debug;
 
 use crate::error::NetError;
 
 pub(crate) struct RequestContext {
     pub(crate) version: Version,
-    // Pre-computed URI components avoid per-request string parsing
-    pub(crate) authority: uri::Authority,
-    pub(crate) path_and_query: uri::PathAndQuery,
+    pub(crate) server_name: Arc<str>,
+    pub(crate) query_path: Arc<str>,
     pub(crate) set_headers: Option<Arc<dyn SetHeaders>>,
 }
 
 impl RequestContext {
-    /// Initializes a new RequestContext, pre-parsing the URI components
-    pub(crate) fn new(
-        version: Version,
-        server_name: &str,
-        query_path: &str,
-        set_headers: Option<Arc<dyn SetHeaders>>,
-    ) -> Result<Self, NetError> {
-        Ok(Self {
-            version,
-            authority: uri::Authority::from_str(server_name)
-                .map_err(|e| NetError::from(format!("invalid authority: {e}")))?,
-            path_and_query: uri::PathAndQuery::try_from(query_path)
-                .map_err(|e| NetError::from(format!("invalid DoH path: {e}")))?,
-            set_headers,
-        })
-    }
-
     /// Create a new Request for an http dns-message request
     ///
     /// ```text
     /// RFC 8484              DNS Queries over HTTPS (DoH)          October 2018
     ///
     /// The URI Template defined in this document is processed without any
-    /// variables when the HTTP method is POST. When the HTTP method is GET,
+    /// variables when the HTTP method is POST.  When the HTTP method is GET,
     /// the single variable "dns" is defined as the content of the DNS
     /// request (as described in Section 6), encoded with base64url
     /// [RFC4648].
     /// ```
     pub(crate) fn build(&self, message_len: usize) -> Result<Request<()>, NetError> {
         let mut parts = uri::Parts::default();
+        parts.path_and_query = Some(
+            uri::PathAndQuery::try_from(&*self.query_path)
+                .map_err(|e| NetError::from(format!("invalid DoH path: {e}")))?,
+        );
         parts.scheme = Some(uri::Scheme::HTTPS);
-        // Cheap clones of pre-parsed components
-        parts.authority = Some(self.authority.clone());
-        parts.path_and_query = Some(self.path_and_query.clone());
+        parts.authority = Some(
+            uri::Authority::from_str(&self.server_name)
+                .map_err(|e| NetError::from(format!("invalid authority: {e}")))?,
+        );
 
-        let url = Uri::from_parts(parts)
-            .map_err(|e| NetError::from(format!("uri parse error: {e}")))?;
+        let url =
+            Uri::from_parts(parts).map_err(|e| NetError::from(format!("uri parse error: {e}")))?;
 
         // TODO: add user agent to TypedHeaders
         let mut request = Request::builder()
-            .method(Method::POST)
+            .method("POST")
             .uri(url)
             .version(self.version.to_http())
             .header(CONTENT_TYPE, MIME_APPLICATION_DNS)
@@ -91,53 +78,63 @@ pub fn verify<T>(
     query_path: &str,
     request: &Request<T>,
 ) -> Result<(), NetError> {
+    // Verify all HTTP parameters
     let uri = request.uri();
 
-    // 1. Validate Path
+    // validate path
     if uri.path() != query_path {
         return Err(format!("bad path: {}, expected: {}", uri.path(), query_path).into());
     }
 
-    // 2. Validate Scheme
+    // we only accept HTTPS
     if Some(&uri::Scheme::HTTPS) != uri.scheme() {
         return Err("must be HTTPS scheme".into());
     }
 
-    // 3. Validate Authority
+    // the authority must match our nameserver name
     if let Some(name_server) = name_server {
-        let host = uri.authority().map(|a| a.host()).ok_or("no authority in HTTPS request")?;
-        if host != name_server {
-            return Err("incorrect authority".into());
+        if let Some(authority) = uri.authority() {
+            if authority.host() != name_server {
+                return Err("incorrect authority".into());
+            }
+        } else {
+            return Err("no authority in HTTPS request".into());
         }
     }
 
-    // 4. Validate Content-Type
     // TODO: switch to mime::APPLICATION_DNS when that stabilizes
-    let ctype = request.headers().get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .ok_or("unsupported content type")?;
-        
-    if ctype != MIME_APPLICATION_DNS {
-        return Err("unsupported content type".into());
-    }
+    match request.headers().get(CONTENT_TYPE).map(|v| v.to_str()) {
+        Some(Ok(ctype)) if ctype == MIME_APPLICATION_DNS => {}
+        _ => return Err("unsupported content type".into()),
+    };
 
-    // 5. Validate Accept Header (Iterator optimized)
     // TODO: switch to mime::APPLICATION_DNS when that stabilizes
-    let accept_header = request.headers().get(ACCEPT)
-        .ok_or("Accept is unspecified")?
-        .to_str()
-        .map_err(|e| NetError::from(e.to_string()))?;
+    match request.headers().get(ACCEPT).map(|v| v.to_str()) {
+        Some(Ok(ctype)) => {
+            let mut found = false;
+            for mime_and_quality in ctype.split(',') {
+                let mut parts = mime_and_quality.splitn(2, ';');
+                match parts.next() {
+                    Some(mime) if mime.trim() == MIME_APPLICATION_DNS => {
+                        found = true;
+                        break;
+                    }
+                    Some(mime) if mime.trim() == "application/*" => {
+                        found = true;
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
 
-    let is_accepted = accept_header.split(',').any(|mime_and_quality| {
-        let mime = mime_and_quality.splitn(2, ';').next().unwrap_or("").trim();
-        mime == MIME_APPLICATION_DNS || mime == "application/*"
-    });
+            if !found {
+                return Err("does not accept content type".into());
+            }
+        }
+        Some(Err(e)) => return Err(e.into()),
+        None => return Err("Accept is unspecified".into()),
+    };
 
-    if !is_accepted {
-        return Err("does not accept content type".into());
-    }
-
-    // 6. Validate Protocol Version
     if request.version() != version.to_http() {
         let message = match version {
             #[cfg(feature = "__https")]
@@ -153,8 +150,8 @@ pub fn verify<T>(
         request
             .headers()
             .get(header::USER_AGENT)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("unknown or bad user agent")
+            .map(|h| h.to_str().unwrap_or("bad user agent"))
+            .unwrap_or("unknown user agent")
     );
 
     Ok(())
@@ -165,22 +162,22 @@ pub fn verify<T>(
 /// ```text
 /// RFC 8484              DNS Queries over HTTPS (DoH)          October 2018
 ///
-///  4.2.1. Handling DNS and HTTP Errors
+///  4.2.1.  Handling DNS and HTTP Errors
 ///
 /// DNS response codes indicate either success or failure for the DNS
-/// query. A successful HTTP response with a 2xx status code (see
+/// query.  A successful HTTP response with a 2xx status code (see
 /// Section 6.3 of [RFC7231]) is used for any valid DNS response,
-/// regardless of the DNS response code. For example, a successful 2xx
+/// regardless of the DNS response code.  For example, a successful 2xx
 /// HTTP status code is used even with a DNS message whose DNS response
 /// code indicates failure, such as SERVFAIL or NXDOMAIN.
 ///
 /// HTTP responses with non-successful HTTP status codes do not contain
-/// replies to the original DNS question in the HTTP request. DoH
+/// replies to the original DNS question in the HTTP request.  DoH
 /// clients need to use the same semantic processing of non-successful
-/// HTTP status codes as other HTTP clients. This might mean that the
+/// HTTP status codes as other HTTP clients.  This might mean that the
 /// DoH client retries the query with the same DoH server, such as if
 /// there are authorization failures (HTTP status code 401; see
-/// Section 3.1 of [RFC7235]). It could also mean that the DoH client
+/// Section 3.1 of [RFC7235]).  It could also mean that the DoH client
 /// retries with a different DoH server, such as for unsupported media
 /// types (HTTP status code 415; see Section 6.5.13 of [RFC7231]), or
 /// where the server cannot generate a representation suitable for the
@@ -239,18 +236,19 @@ mod tests {
         HeaderMap,
         header::{HeaderName, HeaderValue},
     };
+
     use super::*;
 
     #[test]
     #[cfg(feature = "__https")]
     fn test_new_verify_h2() {
-        let cx = RequestContext::new(
-            Version::Http2,
-            "ns.example.com",
-            "/dns-query",
-            None,
-        ).expect("Failed to create context");
-        
+        let cx = RequestContext {
+            version: Version::Http2,
+            server_name: Arc::from("ns.example.com"),
+            query_path: Arc::from("/dns-query"),
+            set_headers: None,
+        };
+
         let request = cx.build(512).expect("error converting to http");
         assert!(
             verify(
@@ -266,16 +264,16 @@ mod tests {
     #[test]
     #[cfg(feature = "__https")]
     fn test_additional_headers() {
-        let cx = RequestContext::new(
-            Version::Http2,
-            "ns.example.com",
-            "/dns-query",
-            Some(Arc::new(vec![(
+        let cx = RequestContext {
+            version: Version::Http2,
+            server_name: Arc::from("ns.example.com"),
+            query_path: Arc::from("/dns-query"),
+            set_headers: Some(Arc::new(vec![(
                 HeaderName::from_static("test-header"),
                 HeaderValue::from_static("test-header-value"),
             )]) as Arc<dyn SetHeaders>),
-        ).expect("Failed to create context");
-        
+        };
+
         let request = cx.build(512).expect("error converting to http");
         assert!(
             verify(
@@ -286,6 +284,7 @@ mod tests {
             )
             .is_ok()
         );
+
         assert_eq!(
             request
                 .headers()
@@ -298,13 +297,13 @@ mod tests {
     #[test]
     #[cfg(feature = "__h3")]
     fn test_new_verify_h3() {
-        let cx = RequestContext::new(
-            Version::Http3,
-            "ns.example.com",
-            "/dns-query",
-            None,
-        ).expect("Failed to create context");
-        
+        let cx = RequestContext {
+            version: Version::Http3,
+            server_name: Arc::from("ns.example.com"),
+            query_path: Arc::from("/dns-query"),
+            set_headers: None,
+        };
+
         let request = cx.build(512).expect("error converting to http");
         assert!(
             verify(
