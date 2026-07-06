@@ -40,7 +40,8 @@ use crate::xfer::{DnsExchange, DnsRequestSender, DnsResponseStream, CONNECT_TIME
 // Obfuscation helpers — always active, no opt-in required
 // ---------------------------------------------------------------------------
 
-/// Block size for request body padding. Every outbound POST body is rounded
+/// Block size for request body padding.
+/// Every outbound POST body is rounded
 /// up to the next multiple of this value by appending zero bytes, masking the
 /// real DNS message length from passive observers.
 const OBFS_PAD_BLOCK: usize = 128;
@@ -95,11 +96,8 @@ fn obfs_pad(buf: &mut Vec<u8>) {
 /// `/dns-query?_=83741`. Defeats URL-pattern classifiers.
 fn obfs_path(path: &str) -> String {
     let nonce = obfs_rand() % 100_000;
-    if path.contains('?') {
-        format!("{path}&_={nonce}")
-    } else {
-        format!("{path}?_={nonce}")
-    }
+    let sep = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{sep}_={nonce}")
 }
 
 /// Inject browser-mimicry headers into a built `http::Request`.
@@ -107,6 +105,10 @@ fn obfs_path(path: &str) -> String {
 fn obfs_inject_headers<B>(req: &mut Request<B>) {
     let ua = OBFS_USER_AGENTS[(obfs_rand() as usize) % OBFS_USER_AGENTS.len()];
     let headers = req.headers_mut();
+    
+    // Pre-reserve capacity to avoid hash map reallocations during insertion.
+    headers.reserve(5);
+    
     headers.insert(USER_AGENT, HeaderValue::from_static(ua));
     headers.insert(
         ACCEPT,
@@ -193,7 +195,6 @@ impl DnsRequestSender for HttpsClientStream {
 
 impl Stream for HttpsClientStream {
     type Item = Result<(), NetError>;
-
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.is_shutdown {
             return Poll::Ready(None);
@@ -302,7 +303,7 @@ pub fn connect(
         query_path,
         set_headers,
     });
-
+    
     async move {
         let tls_server_name = match ServerName::try_from(&*context.server_name) {
             Ok(dns_name) => dns_name.to_owned(),
@@ -327,14 +328,14 @@ pub fn connect(
         })
         .await
         .map_err(|_| NetError::Timeout)??;
-
+        
         debug!("h2 connection established to: {name_server}");
         tokio::spawn(async move {
             if let Err(e) = driver.await {
                 warn!("h2 connection failed: {e}");
             }
         });
-
+        
         Ok(HttpsClientStream {
             h2,
             context,
@@ -358,7 +359,7 @@ async fn send(
     let mut request = cx
         .build(message.remaining())
         .map_err(|err| NetError::from(format!("bad http request: {err}")))?;
-
+        
     // Append random nonce query-param to the request URI to defeat URL classifiers.
     // Doing this in-place avoids allocating a new Arc<str> and Arc<RequestContext>.
     let old_uri = request.uri().clone();
@@ -373,19 +374,18 @@ async fn send(
     obfs_inject_headers(&mut request);
 
     debug!("request: {:#?}", request);
-
     let (response_future, mut send_stream) = h2
         .send_request(request, false)
         .map_err(|err| NetError::from(format!("h2 send_request error: {err}")))?;
-
+        
     send_stream
         .send_data(message, true)
         .map_err(|e| NetError::from(format!("h2 send_data error: {e}")))?;
-
+        
     let mut response_stream = response_future
         .await
         .map_err(|err| NetError::from(format!("received a stream error: {err}")))?;
-
+        
     debug!("got response: {:#?}", response_stream);
 
     let content_length = response_stream
@@ -397,18 +397,20 @@ async fn send(
         .map(usize::from_str)
         .transpose()
         .map_err(|e| NetError::from(format!("bad headers received: {e}")))?;
-
+        
     let initial_capacity = content_length
         .unwrap_or(DEFAULT_DOH_BODY_ALLOC)
         .min(MAX_DOH_BODY)
         .max(MIN_DOH_BODY_ALLOC);
 
-    let mut response_bytes = BytesMut::with_capacity(initial_capacity);
+    // CHANGED: Use a native Vec<u8> directly to bypass the BytesMut intermediate representation.
+    // This entirely removes the expensive `.to_vec()` memory copy previously needed at the end.
+    let mut response_bytes = Vec::with_capacity(initial_capacity);
 
     while let Some(partial_bytes) = response_stream.body_mut().data().await {
         let partial_bytes =
             partial_bytes.map_err(|e| NetError::from(format!("bad http request: {e}")))?;
-
+            
         debug!("got bytes: {}", partial_bytes.len());
         response_bytes.extend_from_slice(&partial_bytes);
 
@@ -438,7 +440,7 @@ async fn send(
     }
 
     if !response_stream.status().is_success() {
-        let error_string = String::from_utf8_lossy(response_bytes.as_ref());
+        let error_string = String::from_utf8_lossy(&response_bytes);
         return Err(NetError::from(format!(
             "http unsuccessful code: {}, message: {}",
             response_stream.status(),
@@ -455,8 +457,9 @@ async fn send(
             }
         }
     };
-
-    DnsResponse::from_buffer(response_bytes.to_vec()).map_err(NetError::from)
+    
+    // CHANGED: response_bytes is already a Vec<u8>, avoiding `.to_vec()`
+    DnsResponse::from_buffer(response_bytes).map_err(NetError::from)
 }
 
 /// Validates and decodes an inbound HTTP/2 DNS request into raw message bytes.
@@ -473,7 +476,6 @@ where
     R: Stream<Item = Result<Bytes, h2::Error>> + 'static + Send + Debug + Unpin,
 {
     debug!("Received request: {:#?}", request);
-
     let this_server_name = this_server_name.as_deref();
     match crate::http::verify(
         Version::Http2,
@@ -510,7 +512,7 @@ where
         .unwrap_or(DEFAULT_DOH_BODY_ALLOC)
         .min(MAX_DOH_BODY)
         .max(MIN_DOH_BODY_ALLOC);
-
+        
     let mut bytes = BytesMut::with_capacity(initial_capacity);
 
     loop {
@@ -567,7 +569,7 @@ mod tests {
     use crate::runtime::TokioRuntimeProvider;
     use crate::tls::client_config;
     use crate::xfer::FirstAnswer;
-
+    
     // --- obfuscation unit tests -------------------------------------------
 
     #[test]
@@ -823,10 +825,8 @@ mod tests {
 
     #[derive(Debug)]
     struct TestBytesStream(Vec<Result<Bytes, h2::Error>>);
-
     impl Stream for TestBytesStream {
         type Item = Result<Bytes, h2::Error>;
-        
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             match self.0.pop() {
                 Some(Ok(bytes)) => Poll::Ready(Some(Ok(bytes))),
