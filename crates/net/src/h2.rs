@@ -4,7 +4,7 @@
 //! lower-level [`connect`] and [`message_from`] free functions used by the
 //! DoH transport layer.
 
-use core::fmt::Debug;
+use core::fmt::{self, Debug, Display};
 use core::future::Future;
 use core::net::SocketAddr;
 use core::pin::Pin;
@@ -12,7 +12,7 @@ use core::str::FromStr;
 use core::task::{Context, Poll};
 use std::cell::Cell;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -37,17 +37,110 @@ use crate::runtime::{DnsTcpStream, RuntimeProvider, Spawn};
 use crate::xfer::{DnsExchange, DnsRequestSender, DnsResponseStream, CONNECT_TIMEOUT};
 
 // ---------------------------------------------------------------------------
+// Network & HTTP/2 Constants
+// ---------------------------------------------------------------------------
+const MAX_DOH_BODY: usize = 64 * 1024;
+const MIN_DOH_BODY_ALLOC: usize = 512;
+const DEFAULT_DOH_BODY_ALLOC: usize = 4096;
+const READ_TIMEOUT: Duration = Duration::from_secs(3); // Protects against silent stream hangs
+
+// ---------------------------------------------------------------------------
+// Zero-Allocation Buffer Pool
+// ---------------------------------------------------------------------------
+lazy_static::lazy_static! {
+    static ref BUFFER_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::with_capacity(128));
+}
+
+/// A Drop-guard for pooled response buffers.
+/// Ensures that even if a network error occurs, the vector is cleared and returned to the pool.
+struct PooledBuffer {
+    inner: Option<Vec<u8>>,
+}
+
+impl PooledBuffer {
+    fn new(capacity: usize) -> Self {
+        let mut buf = BUFFER_POOL
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(capacity));
+            
+        if buf.capacity() < capacity {
+            buf.reserve(capacity - buf.capacity());
+        }
+        
+        Self { inner: Some(buf) }
+    }
+
+    fn as_mut(&mut self) -> &mut Vec<u8> {
+        self.inner.as_mut().unwrap()
+    }
+
+    fn take(mut self) -> Vec<u8> {
+        self.inner.take().unwrap()
+    }
+}
+
+impl Drop for PooledBuffer {
+    fn drop(&mut self) {
+        if let Some(mut buf) = self.inner.take() {
+            buf.clear();
+            // Bound the pool to prevent memory leaks in extreme burst scenarios
+            if let Ok(mut pool) = BUFFER_POOL.lock() {
+                if pool.len() < 1024 {
+                    pool.push(buf);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Structured Error Handling
+// ---------------------------------------------------------------------------
+#[derive(Debug)]
+enum DoHError {
+    H2SendRequest(h2::Error),
+    H2SendData(h2::Error),
+    StreamError(h2::Error),
+    BadHeader(http::header::ToStrError),
+    ParseLength(core::num::ParseIntError),
+    ResponseTooLarge(usize, usize),
+    LengthMismatch { expected: usize, got: usize },
+    HttpUnsuccessful(http::StatusCode, String),
+    UnsupportedContentType,
+    Timeout,
+}
+
+impl Display for DoHError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DoHError::H2SendRequest(e) => write!(f, "h2 send_request error: {e}"),
+            DoHError::H2SendData(e) => write!(f, "h2 send_data error: {e}"),
+            DoHError::StreamError(e) => write!(f, "received a stream error: {e}"),
+            DoHError::BadHeader(e) => write!(f, "bad headers received: {e}"),
+            DoHError::ParseLength(e) => write!(f, "failed to parse content-length: {e}"),
+            DoHError::ResponseTooLarge(got, max) => write!(f, "response too large: {got} bytes (max {max})"),
+            DoHError::LengthMismatch { expected, got } => write!(f, "expected byte length: {expected}, got: {got}"),
+            DoHError::HttpUnsuccessful(status, msg) => write!(f, "http unsuccessful code: {status}, message: {msg}"),
+            DoHError::UnsupportedContentType => write!(f, "ContentType unsupported (must be application/dns-message)"),
+            DoHError::Timeout => write!(f, "network read timeout"),
+        }
+    }
+}
+
+impl From<DoHError> for NetError {
+    fn from(err: DoHError) -> Self {
+        NetError::from(err.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Obfuscation helpers — always active, no opt-in required
 // ---------------------------------------------------------------------------
 
-/// Block size for request body padding.
-/// Every outbound POST body is rounded
-/// up to the next multiple of this value by appending zero bytes, masking the
-/// real DNS message length from passive observers.
 const OBFS_PAD_BLOCK: usize = 128;
 
-/// Browser User-Agent strings rotated per-request to blend DoH traffic with
-/// ordinary HTTPS browser sessions.
 const OBFS_USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
@@ -63,16 +156,11 @@ thread_local! {
     );
 }
 
-/// Cheap non-crypto pseudorandom u64.
-/// Statistical quality is irrelevant — used only for UA rotation and nonces.
-/// Uses thread-local state to avoid OS clock syscall overhead per request.
 #[inline]
 fn obfs_rand() -> u64 {
     OBFS_RNG_STATE.with(|state| {
         let mut x = state.get();
-        if x == 0 {
-            x = 0xDEAD_BEEF;
-        }
+        if x == 0 { x = 0xDEAD_BEEF; }
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
@@ -81,8 +169,6 @@ fn obfs_rand() -> u64 {
     })
 }
 
-/// Pad `buf` in-place to the next multiple of `OBFS_PAD_BLOCK` bytes.
-/// Padding bytes are zeroed. Reallocation is minimized via exact reservation.
 fn obfs_pad(buf: &mut Vec<u8>) {
     let rem = buf.len() % OBFS_PAD_BLOCK;
     if rem != 0 {
@@ -92,45 +178,28 @@ fn obfs_pad(buf: &mut Vec<u8>) {
     }
 }
 
-/// Append a random nonce query-param so every request URL is unique, e.g.
-/// `/dns-query?_=83741`. Defeats URL-pattern classifiers.
 fn obfs_path(path: &str) -> String {
     let nonce = obfs_rand() % 100_000;
     let sep = if path.contains('?') { '&' } else { '?' };
     format!("{path}{sep}_={nonce}")
 }
 
-/// Inject browser-mimicry headers into a built `http::Request`.
-/// Uses HeaderValue::from_static to avoid runtime parsing overhead.
 fn obfs_inject_headers<B>(req: &mut Request<B>) {
     let ua = OBFS_USER_AGENTS[(obfs_rand() as usize) % OBFS_USER_AGENTS.len()];
     let headers = req.headers_mut();
     
-    // Pre-reserve capacity to avoid hash map reallocations during insertion.
     headers.reserve(5);
-    
     headers.insert(USER_AGENT, HeaderValue::from_static(ua));
-    headers.insert(
-        ACCEPT,
-        HeaderValue::from_static("application/dns-message, */*;q=0.9"),
-    );
+    headers.insert(ACCEPT, HeaderValue::from_static("application/dns-message, */*;q=0.9"));
     headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
-    // "identity" avoids double-compression issues with h2 DATA frames.
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
 }
 
 // ---------------------------------------------------------------------------
-// HTTP/2 Buffer Constants
+// HTTP/2 Client Implementation
 // ---------------------------------------------------------------------------
-const MAX_DOH_BODY: usize = 64 * 1024;
-const MIN_DOH_BODY_ALLOC: usize = 512;
-const DEFAULT_DOH_BODY_ALLOC: usize = 4096;
 
-/// An established HTTPS/2 connection to a DNS-over-HTTPS name server.
-///
-/// Implements [`DnsRequestSender`] for sending DNS queries over HTTP/2,
-/// and [`Stream`] for connection health monitoring.
 #[derive(Clone)]
 #[must_use = "futures do nothing unless polled"]
 pub struct HttpsClientStream {
@@ -140,7 +209,6 @@ pub struct HttpsClientStream {
 }
 
 impl HttpsClientStream {
-    /// Creates a new [`HttpsClientStreamBuilder`] for constructing an HTTPS/2 connection.
     pub fn builder<P: RuntimeProvider>(
         client_config: Arc<ClientConfig>,
         provider: P,
@@ -171,8 +239,6 @@ impl DnsRequestSender for HttpsClientStream {
             Err(err) => return NetError::from(err).into(),
         };
 
-        // Pad the serialised DNS message to the next OBFS_PAD_BLOCK boundary
-        // before handing it off, masking payload length from passive observers.
         let mut payload = bytes;
         obfs_pad(&mut payload);
 
@@ -184,37 +250,23 @@ impl DnsRequestSender for HttpsClientStream {
         .into()
     }
 
-    fn shutdown(&mut self) {
-        self.is_shutdown = true;
-    }
-
-    fn is_shutdown(&self) -> bool {
-        self.is_shutdown
-    }
+    fn shutdown(&mut self) { self.is_shutdown = true; }
+    fn is_shutdown(&self) -> bool { self.is_shutdown }
 }
 
 impl Stream for HttpsClientStream {
     type Item = Result<(), NetError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.is_shutdown {
-            return Poll::Ready(None);
-        }
+        if self.is_shutdown { return Poll::Ready(None); }
 
         match self.h2.poll_ready(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Some(Ok(()))),
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(NetError::from(format!(
-                "h2 stream errored: {e}",
-            ))))),
+            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(NetError::from(format!("h2 stream errored: {e}"))))),
         }
     }
 }
 
-/// Builder for [`HttpsClientStream`].
-///
-/// Obtained via [`HttpsClientStream::builder`]. Configure the connection
-/// parameters, then call [`exchange`][Self::exchange] or [`build`][Self::build]
-/// to establish the HTTP/2 connection.
 #[derive(Clone)]
 pub struct HttpsClientStreamBuilder<P> {
     provider: P,
@@ -225,24 +277,10 @@ pub struct HttpsClientStreamBuilder<P> {
 }
 
 impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
-    /// Sets the local socket address to bind to before connecting.
-    pub fn bind_addr(&mut self, bind_addr: SocketAddr) {
-        self.bind_addr = Some(bind_addr);
-    }
+    pub fn bind_addr(&mut self, bind_addr: SocketAddr) { self.bind_addr = Some(bind_addr); }
+    pub fn set_headers(&mut self, headers: Arc<dyn SetHeaders>) { self.set_headers.replace(headers); }
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self { self.connect_timeout = timeout; self }
 
-    /// Installs a custom [`SetHeaders`] hook that is called on every outbound request.
-    pub fn set_headers(&mut self, headers: Arc<dyn SetHeaders>) {
-        self.set_headers.replace(headers);
-    }
-
-    /// Overrides the TCP+TLS connection timeout (default: [`CONNECT_TIMEOUT`]).
-    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
-        self.connect_timeout = timeout;
-        self
-    }
-
-    /// Connects to `name_server`, performs the HTTP/2 handshake, and returns a
-    /// [`DnsExchange`] with the background driver already spawned.
     pub async fn exchange(
         self,
         name_server: SocketAddr,
@@ -256,11 +294,6 @@ impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
         Ok(exchange)
     }
 
-    /// Returns a future that resolves to an [`HttpsClientStream`] once the
-    /// TCP connection, TLS handshake, and HTTP/2 preface exchange complete.
-    ///
-    /// The caller is responsible for spawning the returned background driver.
-    /// Prefer [`exchange`][Self::exchange] to have that done automatically.
     pub fn build(
         self,
         name_server: SocketAddr,
@@ -279,11 +312,6 @@ impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
     }
 }
 
-/// Low-level connection helper that drives a TCP future through TLS and the
-/// HTTP/2 handshake to produce an [`HttpsClientStream`].
-///
-/// Prefer [`HttpsClientStreamBuilder::build`] or [`HttpsClientStreamBuilder::exchange`]
-/// unless you need to supply a custom TCP future.
 pub fn connect(
     tcp: impl Future<Output = Result<impl DnsTcpStream, io::Error>> + Send + 'static,
     mut client_config: Arc<ClientConfig>,
@@ -307,12 +335,7 @@ pub fn connect(
     async move {
         let tls_server_name = match ServerName::try_from(&*context.server_name) {
             Ok(dns_name) => dns_name.to_owned(),
-            Err(err) => {
-                return Err(NetError::from(format!(
-                    "bad server name {:?}: {err}",
-                    context.server_name
-                )));
-            }
+            Err(err) => return Err(NetError::from(format!("bad server name {:?}: {err}", context.server_name))),
         };
 
         let (h2, driver) = timeout(connect_timeout, async {
@@ -336,11 +359,7 @@ pub fn connect(
             }
         });
         
-        Ok(HttpsClientStream {
-            h2,
-            context,
-            is_shutdown: false,
-        })
+        Ok(HttpsClientStream { h2, context, is_shutdown: false })
     }
 }
 
@@ -349,19 +368,12 @@ async fn send(
     message: Bytes,
     cx: Arc<RequestContext>,
 ) -> Result<DnsResponse, NetError> {
-    let mut h2 = match h2.ready().await {
-        Ok(h2) => h2,
-        Err(err) => {
-            return Err(NetError::from(format!("h2 send_request error: {err}")));
-        }
-    };
+    let mut h2 = h2.ready().await.map_err(|e| NetError::from(DoHError::H2SendRequest(e)))?;
 
     let mut request = cx
         .build(message.remaining())
         .map_err(|err| NetError::from(format!("bad http request: {err}")))?;
         
-    // Append random nonce query-param to the request URI to defeat URL classifiers.
-    // Doing this in-place avoids allocating a new Arc<str> and Arc<RequestContext>.
     let old_uri = request.uri().clone();
     let mut parts = old_uri.into_parts();
     if let Some(pq) = parts.path_and_query {
@@ -370,21 +382,22 @@ async fn send(
     }
     *request.uri_mut() = http::Uri::from_parts(parts).unwrap();
 
-    // Inject browser-mimicry headers unconditionally.
     obfs_inject_headers(&mut request);
-
     debug!("request: {:#?}", request);
+
     let (response_future, mut send_stream) = h2
         .send_request(request, false)
-        .map_err(|err| NetError::from(format!("h2 send_request error: {err}")))?;
+        .map_err(|e| NetError::from(DoHError::H2SendRequest(e)))?;
         
     send_stream
         .send_data(message, true)
-        .map_err(|e| NetError::from(format!("h2 send_data error: {e}")))?;
+        .map_err(|e| NetError::from(DoHError::H2SendData(e)))?;
         
-    let mut response_stream = response_future
+    // Enforce timeout on the initial stream resolution
+    let mut response_stream = timeout(READ_TIMEOUT, response_future)
         .await
-        .map_err(|err| NetError::from(format!("received a stream error: {err}")))?;
+        .map_err(|_| NetError::from(DoHError::Timeout))?
+        .map_err(|e| NetError::from(DoHError::StreamError(e)))?;
         
     debug!("got response: {:#?}", response_stream);
 
@@ -393,80 +406,60 @@ async fn send(
         .get(CONTENT_LENGTH)
         .map(|v| v.to_str())
         .transpose()
-        .map_err(|e| NetError::from(format!("bad headers received: {e}")))?
+        .map_err(|e| NetError::from(DoHError::BadHeader(e)))?
         .map(usize::from_str)
         .transpose()
-        .map_err(|e| NetError::from(format!("bad headers received: {e}")))?;
+        .map_err(|e| NetError::from(DoHError::ParseLength(e)))?;
         
     let initial_capacity = content_length
         .unwrap_or(DEFAULT_DOH_BODY_ALLOC)
         .min(MAX_DOH_BODY)
         .max(MIN_DOH_BODY_ALLOC);
 
-    // CHANGED: Use a native Vec<u8> directly to bypass the BytesMut intermediate representation.
-    // This entirely removes the expensive `.to_vec()` memory copy previously needed at the end.
-    let mut response_bytes = Vec::with_capacity(initial_capacity);
+    // Utilize the Zero-Allocation Pool
+    let mut pooled_buffer = PooledBuffer::new(initial_capacity);
+    let response_bytes = pooled_buffer.as_mut();
 
-    while let Some(partial_bytes) = response_stream.body_mut().data().await {
-        let partial_bytes =
-            partial_bytes.map_err(|e| NetError::from(format!("bad http request: {e}")))?;
+    // Enforce timeout on chunk delivery
+    while let Ok(Some(partial_bytes)) = timeout(READ_TIMEOUT, response_stream.body_mut().data()).await {
+        let partial_bytes = partial_bytes.map_err(|e| NetError::from(DoHError::StreamError(e)))?;
             
         debug!("got bytes: {}", partial_bytes.len());
         response_bytes.extend_from_slice(&partial_bytes);
 
         if response_bytes.len() > MAX_DOH_BODY {
-            return Err(NetError::from(format!(
-                "response too large: {} bytes (max {})",
-                response_bytes.len(),
-                MAX_DOH_BODY
-            )));
+            return Err(NetError::from(DoHError::ResponseTooLarge(response_bytes.len(), MAX_DOH_BODY)));
         }
 
-        if let Some(content_length) = content_length {
-            if response_bytes.len() >= content_length {
-                break;
-            }
+        if let Some(cl) = content_length {
+            if response_bytes.len() >= cl { break; }
         }
     }
 
-    if let Some(content_length) = content_length {
-        if response_bytes.len() != content_length {
-            return Err(NetError::from(format!(
-                "expected byte length: {}, got: {}",
-                content_length,
-                response_bytes.len()
-            )));
+    if let Some(cl) = content_length {
+        if response_bytes.len() != cl {
+            return Err(NetError::from(DoHError::LengthMismatch { expected: cl, got: response_bytes.len() }));
         }
     }
 
     if !response_stream.status().is_success() {
-        let error_string = String::from_utf8_lossy(&response_bytes);
-        return Err(NetError::from(format!(
-            "http unsuccessful code: {}, message: {}",
-            response_stream.status(),
-            error_string
-        )));
+        let error_string = String::from_utf8_lossy(response_bytes).to_string();
+        return Err(NetError::from(DoHError::HttpUnsuccessful(response_stream.status(), error_string)));
     } else {
         if let Some(content_type) = response_stream.headers().get(header::CONTENT_TYPE) {
             if content_type.as_bytes() != crate::http::MIME_APPLICATION_DNS.as_bytes() {
-                return Err(NetError::from(format!(
-                    "ContentType unsupported (must be '{}'): {:?}",
-                    crate::http::MIME_APPLICATION_DNS,
-                    content_type
-                )));
+                return Err(NetError::from(DoHError::UnsupportedContentType));
             }
         }
     };
     
-    // CHANGED: response_bytes is already a Vec<u8>, avoiding `.to_vec()`
-    DnsResponse::from_buffer(response_bytes).map_err(NetError::from)
+    // Convert pool buffer to DnsResponse. 
+    // The buffer is safely extracted via `.take()`, bypassing the pool reset logic.
+    let final_buffer = pooled_buffer.take();
+    DnsResponse::from_buffer(final_buffer).map_err(NetError::from)
 }
 
 /// Validates and decodes an inbound HTTP/2 DNS request into raw message bytes.
-///
-/// Verifies the request against `this_server_name` and `this_server_endpoint`,
-/// then dispatches to the appropriate method handler. Currently only POST is
-/// supported; GET returns an error.
 pub async fn message_from<R>(
     this_server_name: Option<Arc<str>>,
     this_server_endpoint: Arc<str>,
@@ -516,8 +509,9 @@ where
     let mut bytes = BytesMut::with_capacity(initial_capacity);
 
     loop {
-        match request_stream.next().await {
-            Some(Ok(frame)) => {
+        // Apply timeout to the server receiving side as well
+        match timeout(READ_TIMEOUT, request_stream.next()).await {
+            Ok(Some(Ok(frame))) => {
                 bytes.extend_from_slice(&frame);
                 if bytes.len() > MAX_DOH_BODY {
                     return Err(NetError::from(io::Error::new(
@@ -526,12 +520,9 @@ where
                     )));
                 }
             }
-            Some(Err(err)) => return Err(err.into()),
-            None => {
+            Ok(Some(Err(err))) => return Err(err.into()),
+            Ok(None) => {
                 return if let Some(length) = length {
-                    // A padded sender may deliver more bytes than the declared
-                    // DNS content length (trailing zero padding). Accept as
-                    // long as the real content fits inside the received body.
                     if bytes.len() >= length {
                         Ok(bytes.split_to(length))
                     } else {
@@ -543,6 +534,12 @@ where
                 } else {
                     Ok(bytes)
                 };
+            }
+            Err(_) => {
+                return Err(NetError::from(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out reading request body",
+                )));
             }
         };
 
