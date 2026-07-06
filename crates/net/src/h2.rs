@@ -12,7 +12,7 @@ use core::str::FromStr;
 use core::task::{Context, Poll};
 use std::cell::Cell;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -47,8 +47,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(3); // Protects against silen
 // ---------------------------------------------------------------------------
 // Zero-Allocation Buffer Pool
 // ---------------------------------------------------------------------------
-lazy_static::lazy_static! {
-    static ref BUFFER_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::with_capacity(128));
+fn buffer_pool() -> &'static Mutex<Vec<Vec<u8>>> {
+    static POOL: OnceLock<Mutex<Vec<Vec<u8>>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(Vec::with_capacity(128)))
 }
 
 /// A Drop-guard for pooled response buffers.
@@ -59,7 +60,7 @@ struct PooledBuffer {
 
 impl PooledBuffer {
     fn new(capacity: usize) -> Self {
-        let mut buf = BUFFER_POOL
+        let mut buf = buffer_pool()
             .lock()
             .unwrap()
             .pop()
@@ -86,7 +87,7 @@ impl Drop for PooledBuffer {
         if let Some(mut buf) = self.inner.take() {
             buf.clear();
             // Bound the pool to prevent memory leaks in extreme burst scenarios
-            if let Ok(mut pool) = BUFFER_POOL.lock() {
+            if let Ok(mut pool) = buffer_pool().lock() {
                 if pool.len() < 1024 {
                     pool.push(buf);
                 }
@@ -103,7 +104,7 @@ enum DoHError {
     H2SendRequest(h2::Error),
     H2SendData(h2::Error),
     StreamError(h2::Error),
-    BadHeader(http::header::ToStrError),
+    BadHeader(header::ToStrError),
     ParseLength(core::num::ParseIntError),
     ResponseTooLarge(usize, usize),
     LengthMismatch { expected: usize, got: usize },
