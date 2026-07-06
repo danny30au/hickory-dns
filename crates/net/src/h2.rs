@@ -201,6 +201,10 @@ fn obfs_inject_headers<B>(req: &mut Request<B>) {
 // HTTP/2 Client Implementation
 // ---------------------------------------------------------------------------
 
+/// An established HTTPS/2 connection to a DNS-over-HTTPS name server.
+///
+/// Implements [`DnsRequestSender`] for sending DNS queries over HTTP/2,
+/// and [`Stream`] for connection health monitoring.
 #[derive(Clone)]
 #[must_use = "futures do nothing unless polled"]
 pub struct HttpsClientStream {
@@ -210,6 +214,7 @@ pub struct HttpsClientStream {
 }
 
 impl HttpsClientStream {
+    /// Creates a new [`HttpsClientStreamBuilder`] for constructing an HTTPS/2 connection.
     pub fn builder<P: RuntimeProvider>(
         client_config: Arc<ClientConfig>,
         provider: P,
@@ -268,6 +273,11 @@ impl Stream for HttpsClientStream {
     }
 }
 
+/// Builder for [`HttpsClientStream`].
+///
+/// Obtained via [`HttpsClientStream::builder`]. Configure the connection
+/// parameters, then call [`exchange`][Self::exchange] or [`build`][Self::build]
+/// to establish the HTTP/2 connection.
 #[derive(Clone)]
 pub struct HttpsClientStreamBuilder<P> {
     provider: P,
@@ -278,10 +288,17 @@ pub struct HttpsClientStreamBuilder<P> {
 }
 
 impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
+    /// Sets the local socket address to bind to before connecting.
     pub fn bind_addr(&mut self, bind_addr: SocketAddr) { self.bind_addr = Some(bind_addr); }
+    
+    /// Installs a custom [`SetHeaders`] hook that is called on every outbound request.
     pub fn set_headers(&mut self, headers: Arc<dyn SetHeaders>) { self.set_headers.replace(headers); }
+    
+    /// Overrides the TCP+TLS connection timeout (default is defined by [`CONNECT_TIMEOUT`]).
     pub fn connect_timeout(mut self, timeout: Duration) -> Self { self.connect_timeout = timeout; self }
 
+    /// Connects to the specified `name_server`, performs the HTTP/2 handshake, and returns a
+    /// [`DnsExchange`] with the background driver already spawned.
     pub async fn exchange(
         self,
         name_server: SocketAddr,
@@ -295,6 +312,11 @@ impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
         Ok(exchange)
     }
 
+    /// Returns a future that resolves to an [`HttpsClientStream`] once the
+    /// TCP connection, TLS handshake, and HTTP/2 preface exchange complete.
+    ///
+    /// The caller is responsible for spawning the returned background driver.
+    /// Prefer [`exchange`][Self::exchange] to have that done automatically.
     pub fn build(
         self,
         name_server: SocketAddr,
@@ -313,6 +335,11 @@ impl<P: RuntimeProvider> HttpsClientStreamBuilder<P> {
     }
 }
 
+/// Low-level connection helper that drives a TCP future through TLS and the
+/// HTTP/2 handshake to produce an [`HttpsClientStream`].
+///
+/// Prefer [`HttpsClientStreamBuilder::build`] or [`HttpsClientStreamBuilder::exchange`]
+/// unless you need to supply a custom TCP future.
 pub fn connect(
     tcp: impl Future<Output = Result<impl DnsTcpStream, io::Error>> + Send + 'static,
     mut client_config: Arc<ClientConfig>,
@@ -461,6 +488,10 @@ async fn send(
 }
 
 /// Validates and decodes an inbound HTTP/2 DNS request into raw message bytes.
+///
+/// Verifies the request against `this_server_name` and `this_server_endpoint`,
+/// then dispatches to the appropriate method handler. Currently only POST is
+/// supported; GET returns an error.
 pub async fn message_from<R>(
     this_server_name: Option<Arc<str>>,
     this_server_endpoint: Arc<str>,
